@@ -5,7 +5,6 @@ import sys
 import threading
 import time
 import logging
-import unicodedata
 from datetime import datetime
 from pathlib import Path
 from watchdog.observers import Observer
@@ -26,31 +25,24 @@ except ImportError:
 
 # Paths
 SOURCE_DIR  = Path(r"??")
-ORPHAN_DIR  = SOURCE_DIR.parent / "??"
+ORPHAN_DIR  = Path(r"??")
 DEST_PHOTOS = Path(r"??")
 PUBLIC_MDB  = Path(r"??")
+DOCUM_MDB   = Path(r"??")
 
-# File types to watch
-WATCHED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
-
-# Retry settings for locked files (15 x 3s = 45s max)
+# Settings
+WATCHED_EXTENSIONS     = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
 FILE_LOCK_RETRY_DELAY  = 3
 FILE_LOCK_MAX_ATTEMPTS = 15
+PATIENT_POLL_INTERVAL  = 3
+PATIENT_WAIT_TIMEOUT   = 900
 
-# Patient polling settings (every 3s, give up after 15min)
-PATIENT_POLL_INTERVAL = 3
-PATIENT_WAIT_TIMEOUT  = 900
-
-# Characters used to build the patient folder name
-NOM_CHARS    = 4
-PRENOM_CHARS = 3
-
-# Field names in the StudioVision Access form
+# Access form field names
 ACCESS_FIELD_CODE   = "Code patient"
 ACCESS_FIELD_NOM    = "NOM"
 ACCESS_FIELD_PRENOM = "Prénom"
 
-# Description inserted in DB per file type
+# DB description per file type
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
@@ -74,41 +66,34 @@ logging.basicConfig(
 log = logging.getLogger("image_router")
 
 
-def normalise(text: str) -> str:
-    nfkd = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
-
-
-def build_folder_pattern(patient: dict) -> str:
-    code   = str(patient["code"])
-    nom    = normalise(patient["nom"])[:NOM_CHARS]
-    prenom = normalise(patient["prenom"])[:PRENOM_CHARS]
-    return f"{code}{nom}.{prenom}"
+def db_connect(mdb_path: Path):
+    return pyodbc.connect(
+        f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={mdb_path};"
+    )
 
 
 def get_active_patient() -> dict | None:
     if not WIN32_AVAILABLE:
-        log.debug("win32com unavailable.")
         return None
 
     try:
         access = win32com.client.GetActiveObject("Access.Application")
-        form = access.Screen.ActiveForm
+        form   = access.Screen.ActiveForm
         if form is None:
             return None
 
-        target_fields = {ACCESS_FIELD_CODE, ACCESS_FIELD_NOM, ACCESS_FIELD_PRENOM}
+        target = {ACCESS_FIELD_CODE, ACCESS_FIELD_NOM, ACCESS_FIELD_PRENOM}
         data: dict = {}
 
         for i in range(form.Controls.Count):
             ctrl = form.Controls(i)
             try:
-                if str(ctrl.Name) in target_fields:
+                if str(ctrl.Name) in target:
                     data[ctrl.Name] = ctrl.Value
             except Exception:
                 pass
 
-        if not target_fields.issubset(data.keys()):
+        if not target.issubset(data.keys()):
             return None
 
         return {
@@ -122,90 +107,66 @@ def get_active_patient() -> dict | None:
         return None
 
 
-def find_folder_from_db(patient: dict) -> Path | None:
-    # Look up an existing document for this patient to extract their folder path.
-    if not PYODBC_AVAILABLE or not PUBLIC_MDB.exists():
+def find_patient_folder(patient_code: str) -> Path | None:
+    # Query PUBLIC.MDB Documents table to find the patient's existing folder.
+    # Extract the group and patient folder from a previous Photo externe entry.
+    if not PYODBC_AVAILABLE:
+        log.error("pyodbc not available.")
+        return None
+
+    if not PUBLIC_MDB.exists():
+        log.error(f"PUBLIC.MDB not found: {PUBLIC_MDB}")
         return None
 
     try:
-        conn = pyodbc.connect(
-            f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={PUBLIC_MDB};"
-        )
+        conn   = db_connect(PUBLIC_MDB)
         cursor = conn.cursor()
         cursor.execute(
             "SELECT TOP 1 [Photo externe] FROM Documents "
             "WHERE [code patient] = ? AND [Photo externe] IS NOT NULL",
-            (int(patient["code"]),)
+            (int(patient_code),)
         )
         row = cursor.fetchone()
         conn.close()
 
         if not row or not row[0]:
-            log.info(f"No existing document for patient {patient['code']}")
+            log.warning(f"No existing document found for patient {patient_code}.")
             return None
 
-        # Photo externe format: \17.000\1758506693bon.eri\image.jpg
         parts = row[0].strip().strip("\\").split("\\")
-        if len(parts) >= 2:
-            folder = DEST_PHOTOS / parts[0] / parts[1]
-            if folder.is_dir():
-                log.info(f"Folder found via DB: {folder}")
-                return folder
-            log.warning(f"DB path found but folder missing on disk: {folder}")
+        if len(parts) < 2:
+            log.error(f"Unexpected Photo externe format: {row[0]}")
+            return None
 
-        return None
+        folder = DEST_PHOTOS / parts[0] / parts[1]
+        if not folder.is_dir():
+            log.error(f"Folder found in DB but missing on disk: {folder}")
+            return None
+
+        log.info(f"Patient folder resolved: {folder}")
+        return folder
 
     except Exception as e:
         log.error(f"DB folder lookup failed: {e}")
         return None
 
 
-def find_folder_on_disk(patient: dict, pattern: str) -> Path | None:
-    # Fallback: scan all group folders when DB lookup fails.
-    if not DEST_PHOTOS.exists():
-        log.error(f"Network drive unreachable: {DEST_PHOTOS}")
-        return None
-
-    try:
-        code_int      = int(patient["code"])
-        group_number  = abs(code_int) // 1000
-        group_name    = f"{group_number:02d}.000"
-        candidate     = DEST_PHOTOS / group_name / pattern
-
-        if candidate.is_dir():
-            log.info(f"Fast path found: {candidate}")
-            return candidate
-
-        log.debug(f"Fast path miss, scanning...")
-
-    except (ValueError, TypeError):
-        pass
-
-    for group in DEST_PHOTOS.iterdir():
-        if not group.is_dir():
-            continue
-        candidate = group / pattern
-        if candidate.is_dir():
-            log.info(f"Fallback found: {candidate}")
-            return candidate
-
-    log.warning(f"No folder found for '{pattern}'")
-    return None
-
-
 def insert_document(patient: dict, relative_path: str, description: str) -> bool:
+    # Insert a new row in DOCUM.MDB > DOCUMENTS.
+    # If DOCUM.MDB is empty or unavailable, fall back to PUBLIC.MDB.
     if not PYODBC_AVAILABLE:
-        log.warning("pyodbc unavailable, DB insert skipped.")
+        log.warning("pyodbc not available, insert skipped.")
         return False
 
-    if not PUBLIC_MDB.exists():
-        log.error(f"PUBLIC.MDB not found: {PUBLIC_MDB}")
+    # Determine which MDB to write to.
+    target_mdb = DOCUM_MDB if DOCUM_MDB.exists() else PUBLIC_MDB
+
+    if not target_mdb.exists():
+        log.error("No writable MDB found.")
         return False
 
     try:
-        conn   = pyodbc.connect(
-            f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={PUBLIC_MDB};"
-        )
+        conn   = db_connect(target_mdb)
         cursor = conn.cursor()
 
         cursor.execute("SELECT MAX(NUMDOC) FROM Documents")
@@ -223,7 +184,7 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         conn.commit()
         conn.close()
 
-        log.info(f"DB insert OK: NUMDOC={numdoc} patient={patient['code']} path='{relative_path}'")
+        log.info(f"Insert OK: NUMDOC={numdoc} patient={patient['code']} path='{relative_path}' db={target_mdb.name}")
         return True
 
     except Exception as e:
@@ -269,7 +230,6 @@ def orphan_file(file: Path) -> None:
 
 
 def worker(file_queue: queue.Queue) -> None:
-    # Initialize COM for this thread.
     pythoncom.CoInitialize()
     log.info("Worker started.")
 
@@ -288,25 +248,23 @@ def worker(file_queue: queue.Queue) -> None:
                 file_queue.task_done()
                 continue
 
-            # Wait until the file is fully written and unlocked.
+            # Wait until the device has finished writing the file.
             if not wait_for_file(file):
                 log.error(f"Aborting, persistent lock: {file.name}")
                 file_queue.task_done()
                 continue
 
-            # Poll Access until a patient is open or timeout.
-            patient       = None
-            start_time    = time.monotonic()
-            first_log     = True
+            # Poll Access until a patient is open or timeout is reached.
+            patient    = None
+            start_time = time.monotonic()
+            first_log  = True
 
             while True:
                 patient = get_active_patient()
-
                 if patient:
                     break
 
                 elapsed = time.monotonic() - start_time
-
                 if elapsed >= PATIENT_WAIT_TIMEOUT:
                     orphan_file(file)
                     file_queue.task_done()
@@ -322,17 +280,12 @@ def worker(file_queue: queue.Queue) -> None:
             if patient is None:
                 continue
 
-            pattern = build_folder_pattern(patient)
-            log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']}) -> '{pattern}'")
+            log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']})")
 
-            # Find the patient folder: DB lookup first, disk scan as fallback.
-            patient_folder = find_folder_from_db(patient)
+            # Resolve the patient folder from the DB using the patient code.
+            patient_folder = find_patient_folder(patient["code"])
             if not patient_folder:
-                log.info("DB lookup failed, falling back to disk scan.")
-                patient_folder = find_folder_on_disk(patient, pattern)
-
-            if not patient_folder:
-                log.error(f"Folder not found for '{pattern}'. Orphaning.")
+                log.error(f"Could not resolve folder for patient {patient['code']}. Orphaning.")
                 orphan_file(file)
                 file_queue.task_done()
                 continue
@@ -343,7 +296,7 @@ def worker(file_queue: queue.Queue) -> None:
                 file_queue.task_done()
                 continue
 
-            # Insert a row in Documents so StudioVision can display the image.
+            # Build the relative path and insert into the DB.
             group_name    = patient_folder.parent.name
             relative_path = f"\\{group_name}\\{patient_folder.name}\\{dest.name}"
             description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
@@ -367,7 +320,6 @@ class ImageProducer(FileSystemEventHandler):
             return
 
         file = Path(event.src_path)
-
         if file.suffix.lower() not in WATCHED_EXTENSIONS:
             return
 
@@ -382,13 +334,14 @@ def main() -> None:
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Image Router v3.1 started")
-    log.info(f"  Source   : {SOURCE_DIR}")
-    log.info(f"  Dest     : {DEST_PHOTOS}")
-    log.info(f"  Database : {PUBLIC_MDB}")
-    log.info(f"  Orphans  : {ORPHAN_DIR}")
-    log.info(f"  Timeout  : {PATIENT_WAIT_TIMEOUT // 60} min")
-    log.info(f"  Ext      : {', '.join(sorted(WATCHED_EXTENSIONS))}")
+    log.info("Image Router v3.2 started")
+    log.info(f"  Source     : {SOURCE_DIR}")
+    log.info(f"  Dest       : {DEST_PHOTOS}")
+    log.info(f"  PUBLIC.MDB : {PUBLIC_MDB}")
+    log.info(f"  DOCUM.MDB  : {DOCUM_MDB}")
+    log.info(f"  Orphans    : {ORPHAN_DIR}")
+    log.info(f"  Timeout    : {PATIENT_WAIT_TIMEOUT // 60} min")
+    log.info(f"  Ext        : {', '.join(sorted(WATCHED_EXTENSIONS))}")
 
     file_queue: queue.Queue = queue.Queue()
 
