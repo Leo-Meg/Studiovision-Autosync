@@ -1,3 +1,4 @@
+import pythoncom
 import queue
 import shutil
 import sys
@@ -110,12 +111,12 @@ def get_patient_actif() -> dict | None:
             try:
                 if str(ctrl.Name) in champs_cibles:
                     data[ctrl.Name] = ctrl.Value
-                    print(f"[DEBUG]   {ctrl.Name} = {ctrl.Value}")  # confirm each target field is read
+                    print(f"[DEBUG]   {ctrl.Name} = {ctrl.Value}")
             except Exception:
                 pass
 
         if not champs_cibles.issubset(data.keys()):
-            print(f"[DEBUG] Missing fields: {champs_cibles - data.keys()}")  # shows which fields were not found
+            print(f"[DEBUG] Missing fields: {champs_cibles - data.keys()}")
             return None
 
         return {
@@ -130,7 +131,6 @@ def get_patient_actif() -> dict | None:
 
 
 def trouver_dossier_patient(patient: dict, motif: str) -> Path | None:
-    # Fallback: scan all group folders if Fast Path misses (negative codes, edge cases).
     if not DEST_PHOTOS.exists():
         log.error(f"Network drive unreachable: {DEST_PHOTOS}")
         return None
@@ -164,7 +164,6 @@ def trouver_dossier_patient(patient: dict, motif: str) -> Path | None:
 
 
 def inserer_document(patient: dict, chemin_relatif: str, description: str) -> bool:
-    # Insert one row in PUBLIC.MDB > Documents so StudioVision shows the image.
     if not PYODBC_AVAILABLE:
         log.warning("pyodbc unavailable — DB insert skipped.")
         return False
@@ -177,7 +176,6 @@ def inserer_document(patient: dict, chemin_relatif: str, description: str) -> bo
         conn   = pyodbc.connect(f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={PUBLIC_MDB};")
         cursor = conn.cursor()
 
-        # Use MAX(NUMDOC) + 1 as the next unique ID
         cursor.execute("SELECT MAX(NUMDOC) FROM Documents")
         row    = cursor.fetchone()
         numdoc = int(row[0] if row[0] is not None else 0) + 1
@@ -202,7 +200,6 @@ def inserer_document(patient: dict, chemin_relatif: str, description: str) -> bo
 
 
 def attendre_disponibilite(fichier: Path) -> bool:
-    # Wait until the file is no longer locked by the medical device.
     for tentative in range(1, FILE_LOCK_MAX_ATTEMPTS + 1):
         try:
             with fichier.open("rb"):
@@ -216,8 +213,6 @@ def attendre_disponibilite(fichier: Path) -> bool:
 
 
 def deplacer_vers(source: Path, dossier_dest: Path, label: str = "") -> Path | None:
-    # Move source to dossier_dest. Adds a timestamp suffix if filename already exists.
-    # Returns the final path on success, None on failure.
     dossier_dest.mkdir(parents=True, exist_ok=True)
     dest = dossier_dest / source.name
 
@@ -237,96 +232,99 @@ def deplacer_vers(source: Path, dossier_dest: Path, label: str = "") -> Path | N
 
 
 def orpheliner(fichier: Path) -> None:
-    # No patient found after timeout — move file to the orphan folder.
     log.warning(f"Timeout reached — orphaning: {fichier.name}")
     deplacer_vers(fichier, ORPHAN_DIR, label="ORPHAN")
 
 
 def worker(file_queue: queue.Queue) -> None:
-    # Background thread that processes one image at a time from the queue.
+    # ← FIX : initialiser COM pour ce thread
+    pythoncom.CoInitialize()
     log.info("Worker started — waiting for images...")
 
-    while True:
-        try:
-            fichier: Path = file_queue.get()
-        except Exception as e:
-            log.error(f"Queue read error: {e}")
-            continue
-
-        log.info(f"Processing: {fichier.name}  ({file_queue.qsize()} pending)")
-
-        if not fichier.exists():
-            log.warning(f"File gone before processing: {fichier}")
-            file_queue.task_done()
-            continue
-
-        # Step 1: wait until the device has finished writing the file
-        if not attendre_disponibilite(fichier):
-            log.error(f"Aborting (persistent lock): {fichier.name}")
-            file_queue.task_done()
-            continue
-
-        # Step 2: poll Access until a patient is open, or timeout after 15min
-        patient       = None
-        debut_attente = time.monotonic()
-        premier_log   = True
-
+    try:
         while True:
-            patient = get_patient_actif()
+            try:
+                fichier: Path = file_queue.get()
+            except Exception as e:
+                log.error(f"Queue read error: {e}")
+                continue
 
-            if patient:
-                break
+            log.info(f"Processing: {fichier.name}  ({file_queue.qsize()} pending)")
 
-            temps_ecoule = time.monotonic() - debut_attente
+            if not fichier.exists():
+                log.warning(f"File gone before processing: {fichier}")
+                file_queue.task_done()
+                continue
 
-            if temps_ecoule >= PATIENT_WAIT_TIMEOUT:
+            # Step 1: wait until the device has finished writing the file
+            if not attendre_disponibilite(fichier):
+                log.error(f"Aborting (persistent lock): {fichier.name}")
+                file_queue.task_done()
+                continue
+
+            # Step 2: poll Access until a patient is open, or timeout after 15min
+            patient       = None
+            debut_attente = time.monotonic()
+            premier_log   = True
+
+            while True:
+                patient = get_patient_actif()
+
+                if patient:
+                    break
+
+                temps_ecoule = time.monotonic() - debut_attente
+
+                if temps_ecoule >= PATIENT_WAIT_TIMEOUT:
+                    orpheliner(fichier)
+                    file_queue.task_done()
+                    patient = None
+                    break
+
+                if premier_log:
+                    log.info(f"No patient open — waiting (timeout in {PATIENT_WAIT_TIMEOUT // 60} min)")
+                    premier_log = False
+                else:
+                    log.debug(f"Still waiting... ({(PATIENT_WAIT_TIMEOUT - temps_ecoule) / 60:.1f} min left)")
+
+                time.sleep(PATIENT_POLL_INTERVAL)
+
+            if patient is None:
+                continue
+
+            # Step 3: build the patient folder name pattern
+            motif = construire_motif(patient)
+            log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']}) -> '{motif}'")
+
+            # Step 4: find the folder on disk
+            dossier_patient = trouver_dossier_patient(patient, motif)
+            if not dossier_patient:
+                log.error(f"Folder '{motif}' not found. Orphaning.")
                 orpheliner(fichier)
                 file_queue.task_done()
-                patient = None
-                break
+                continue
 
-            if premier_log:
-                log.info(f"No patient open — waiting (timeout in {PATIENT_WAIT_TIMEOUT // 60} min)")
-                premier_log = False
-            else:
-                log.debug(f"Still waiting... ({(PATIENT_WAIT_TIMEOUT - temps_ecoule) / 60:.1f} min left)")
+            # Step 5: move the image into the patient folder
+            dest = deplacer_vers(fichier, dossier_patient)
+            if dest is None:
+                file_queue.task_done()
+                continue
 
-            time.sleep(PATIENT_POLL_INTERVAL)
+            # Step 6: insert a row in PUBLIC.MDB so StudioVision can see the image
+            groupe_reel    = dossier_patient.parent.name
+            chemin_relatif = f"\\{groupe_reel}\\{motif}\\{dest.name}"
+            description    = EXAM_DESCRIPTION.get(fichier.suffix.lower(), "Image")
 
-        if patient is None:
-            continue
+            inserer_document(patient, chemin_relatif, description)
 
-        # Step 3: build the patient folder name pattern
-        motif = construire_motif(patient)
-        log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']}) -> '{motif}'")
-
-        # Step 4: find the folder on disk
-        dossier_patient = trouver_dossier_patient(patient, motif)
-        if not dossier_patient:
-            log.error(f"Folder '{motif}' not found. Orphaning.")
-            orpheliner(fichier)
             file_queue.task_done()
-            continue
 
-        # Step 5: move the image into the patient folder
-        dest = deplacer_vers(fichier, dossier_patient)
-        if dest is None:
-            file_queue.task_done()
-            continue
-
-        # Step 6: insert a row in PUBLIC.MDB so StudioVision can see the image
-        groupe_reel    = dossier_patient.parent.name
-        chemin_relatif = f"\\{groupe_reel}\\{motif}\\{dest.name}"
-        description    = EXAM_DESCRIPTION.get(fichier.suffix.lower(), "Image")
-
-        inserer_document(patient, chemin_relatif, description)
-
-        file_queue.task_done()
+    finally:
+        # ← FIX : nettoyer COM proprement à la fin du thread
+        pythoncom.CoUninitialize()
 
 
 class ImageProducer(FileSystemEventHandler):
-    # Watchdog handler — only puts the file path in the queue, never blocks.
-
     def __init__(self, file_queue: queue.Queue) -> None:
         super().__init__()
         self._queue = file_queue
