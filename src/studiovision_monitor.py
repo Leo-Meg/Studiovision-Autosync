@@ -9,9 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import win32gui
-import win32con
-import win32api
 
 
 # win32com is Windows-only
@@ -190,27 +187,33 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
     except Exception as e:
         log.error(f"DB insert failed: {e}")
         return False
-    
-def refresh_by_keypress() -> None:
+
+
+def refresh_ui() -> None:
+    # Requery the active Access form so the new document appears without restarting.
+    # Falls back to Refresh() if Requery() is unavailable (read-only or subform).
     if not WIN32_AVAILABLE:
         return
     try:
         access = win32com.client.GetActiveObject("Access.Application")
-        hwnd   = access.hWndAccessApp()
+        form   = access.Screen.ActiveForm
+        if form is None:
+            log.warning("Refresh skipped: no active form in Access.")
+            return
 
-        # Forcer Access au premier plan avant d'envoyer la touche
-        win32gui.SetForegroundWindow(hwnd)
-        time.sleep(0.3)  # laisser Windows traiter le changement de focus
+        try:
+            form.Requery()
+            log.info(f"Requery() applied on form '{form.Name}'.")
+        except Exception as e_requery:
+            log.warning(f"Requery() unavailable ({e_requery}), trying Refresh().")
+            try:
+                form.Refresh()
+                log.info(f"Refresh() applied on form '{form.Name}'.")
+            except Exception as e_refresh:
+                log.warning(f"Refresh() also unavailable ({e_refresh}). Skipping.")
 
-        # Shift+F9 via win32api directement sur la fenêtre Access
-        win32api.keybd_event(win32con.VK_SHIFT, 0, 0, 0)
-        win32api.keybd_event(win32con.VK_F9, 0, 0, 0)
-        win32api.keybd_event(win32con.VK_F9, 0, win32con.KEYEVENTF_KEYUP, 0)
-        win32api.keybd_event(win32con.VK_SHIFT, 0, win32con.KEYEVENTF_KEYUP, 0)
-
-        log.info("Shift+F9 envoyé avec focus forcé.")
     except Exception as e:
-        log.warning(f"Keypress refresh échoué (non bloquant) : {e}")
+        log.warning(f"COM refresh failed (non-blocking): {e}")
 
 
 def wait_for_file(file: Path) -> bool:
@@ -327,7 +330,7 @@ def worker(file_queue: queue.Queue) -> None:
 
             insert_document(patient, relative_path, description)
             time.sleep(0.5)
-            refresh_by_keypress()
+            refresh_ui()
 
             file_queue.task_done()
 
