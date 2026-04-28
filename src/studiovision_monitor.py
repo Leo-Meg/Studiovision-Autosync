@@ -10,12 +10,15 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+
+# win32com is Windows-only
 try:
     import win32com.client
     WIN32_AVAILABLE = True
 except ImportError:
     WIN32_AVAILABLE = False
 
+# pyodbc is Windows-only
 try:
     import pyodbc
     PYODBC_AVAILABLE = True
@@ -23,26 +26,24 @@ except ImportError:
     PYODBC_AVAILABLE = False
 
 
-# Paths
-SOURCE_DIR  = Path(r"??")
-ORPHAN_DIR  = Path(r"??")
-DEST_PHOTOS = Path(r"??")
-PUBLIC_MDB  = Path(r"??")
-DOCUM_MDB   = Path(r"??")
+SOURCE_DIR  = Path(r"C:\Users\Box-6\Desktop\Images partagées test")
+ORPHAN_DIR  = Path(r"C:\Users\Box-6\Desktop\Images_Oubliées")
+DEST_PHOTOS = Path(r"M:\PHOTOS")
+PUBLIC_MDB  = Path(r"M:\fichier\PUBLIC.MDB")
+DOCUM_MDB   = Path(r"M:\fichier\DOCUM.MDB")
 
-# Settings
 WATCHED_EXTENSIONS     = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
-FILE_LOCK_RETRY_DELAY  = 3
-FILE_LOCK_MAX_ATTEMPTS = 15
-PATIENT_POLL_INTERVAL  = 3
-PATIENT_WAIT_TIMEOUT   = 900
+FILE_LOCK_RETRY_DELAY  = 3    # seconds between lock-check retries
+FILE_LOCK_MAX_ATTEMPTS = 15   # give up after this many retries
+PATIENT_POLL_INTERVAL  = 3    # seconds between Access polls
+PATIENT_WAIT_TIMEOUT   = 900  # seconds before orphaning a file (15 min)
 
-# Access form field names
+# Field names as they appear in the StudioVision Access form
 ACCESS_FIELD_CODE   = "Code patient"
 ACCESS_FIELD_NOM    = "NOM"
 ACCESS_FIELD_PRENOM = "Prénom"
 
-# DB description per file type
+# Description written to the DB per file type
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
@@ -73,6 +74,7 @@ def db_connect(mdb_path: Path):
 
 
 def get_active_patient() -> dict | None:
+    # Read the currently open patient from the StudioVision Access form via COM
     if not WIN32_AVAILABLE:
         return None
 
@@ -91,10 +93,10 @@ def get_active_patient() -> dict | None:
                 if str(ctrl.Name) in target:
                     data[ctrl.Name] = ctrl.Value
             except Exception:
-                pass
+                pass  # labels and buttons have no .Value
 
         if not target.issubset(data.keys()):
-            return None
+            return None  # active form is not the patient form
 
         return {
             "code":   str(data[ACCESS_FIELD_CODE]),
@@ -108,8 +110,7 @@ def get_active_patient() -> dict | None:
 
 
 def find_patient_folder(patient_code: str) -> Path | None:
-    # Query PUBLIC.MDB Documents table to find the patient's existing folder.
-    # Extract the group and patient folder from a previous Photo externe entry.
+    # Query PUBLIC.MDB to find the patient's folder from a previous Photo externe entry
     if not PYODBC_AVAILABLE:
         log.error("pyodbc not available.")
         return None
@@ -133,6 +134,7 @@ def find_patient_folder(patient_code: str) -> Path | None:
             log.warning(f"No existing document found for patient {patient_code}.")
             return None
 
+        # Photo externe format: \17.000\1758506693bon.eri\filename.jpg
         parts = row[0].strip().strip("\\").split("\\")
         if len(parts) < 2:
             log.error(f"Unexpected Photo externe format: {row[0]}")
@@ -152,13 +154,13 @@ def find_patient_folder(patient_code: str) -> Path | None:
 
 
 def insert_document(patient: dict, relative_path: str, description: str) -> bool:
-    # Insert a new row in DOCUM.MDB > DOCUMENTS.
-    # If DOCUM.MDB is empty or unavailable, fall back to PUBLIC.MDB.
+    # Insert one row in DOCUM.MDB (or PUBLIC.MDB as fallback) so StudioVision shows the image.
+    # Uses TOP 1 ORDER BY NUMDOC DESC instead of MAX(NUMDOC) to avoid the ODBC -1011 error
+    # on large tables where MAX() triggers a full scan.
     if not PYODBC_AVAILABLE:
         log.warning("pyodbc not available, insert skipped.")
         return False
 
-    # Determine which MDB to write to.
     target_mdb = DOCUM_MDB if DOCUM_MDB.exists() else PUBLIC_MDB
 
     if not target_mdb.exists():
@@ -169,9 +171,9 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         conn   = db_connect(target_mdb)
         cursor = conn.cursor()
 
-        cursor.execute("SELECT MAX(NUMDOC) FROM Documents")
+        cursor.execute("SELECT TOP 1 NUMDOC FROM Documents ORDER BY NUMDOC DESC")
         row    = cursor.fetchone()
-        numdoc = int(row[0] if row[0] is not None else 0) + 1
+        numdoc = int(row[0] if row and row[0] is not None else 0) + 1
 
         cursor.execute(
             """
@@ -193,6 +195,7 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
 
 
 def wait_for_file(file: Path) -> bool:
+    # Wait until the file is no longer locked by the medical device
     for attempt in range(1, FILE_LOCK_MAX_ATTEMPTS + 1):
         try:
             with file.open("rb"):
@@ -206,6 +209,7 @@ def wait_for_file(file: Path) -> bool:
 
 
 def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
+    # Move source to dest_folder, adding a timestamp suffix on name conflict
     dest_folder.mkdir(parents=True, exist_ok=True)
     dest = dest_folder / source.name
 
@@ -230,6 +234,7 @@ def orphan_file(file: Path) -> None:
 
 
 def worker(file_queue: queue.Queue) -> None:
+    # COM must be initialized on the worker thread (not the main thread)
     pythoncom.CoInitialize()
     log.info("Worker started.")
 
@@ -248,13 +253,13 @@ def worker(file_queue: queue.Queue) -> None:
                 file_queue.task_done()
                 continue
 
-            # Wait until the device has finished writing the file.
+            # Step 1: wait until the device has finished writing the file
             if not wait_for_file(file):
                 log.error(f"Aborting, persistent lock: {file.name}")
                 file_queue.task_done()
                 continue
 
-            # Poll Access until a patient is open or timeout is reached.
+            # Step 2: poll Access until a patient is open or timeout is reached
             patient    = None
             start_time = time.monotonic()
             first_log  = True
@@ -282,7 +287,7 @@ def worker(file_queue: queue.Queue) -> None:
 
             log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']})")
 
-            # Resolve the patient folder from the DB using the patient code.
+            # Step 3: resolve the patient folder from the DB
             patient_folder = find_patient_folder(patient["code"])
             if not patient_folder:
                 log.error(f"Could not resolve folder for patient {patient['code']}. Orphaning.")
@@ -290,13 +295,13 @@ def worker(file_queue: queue.Queue) -> None:
                 file_queue.task_done()
                 continue
 
-            # Move the image into the patient folder.
+            # Step 4: move the image into the patient folder
             dest = move_file(file, patient_folder)
             if dest is None:
                 file_queue.task_done()
                 continue
 
-            # Build the relative path and insert into the DB.
+            # Step 5: insert a record in the DB so StudioVision can see the image
             group_name    = patient_folder.parent.name
             relative_path = f"\\{group_name}\\{patient_folder.name}\\{dest.name}"
             description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
@@ -310,6 +315,7 @@ def worker(file_queue: queue.Queue) -> None:
 
 
 class ImageProducer(FileSystemEventHandler):
+    # Watchdog handler: enqueues new image files, never blocks
 
     def __init__(self, file_queue: queue.Queue) -> None:
         super().__init__()
@@ -334,7 +340,7 @@ def main() -> None:
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Image Router v3.2 started")
+    log.info("Image Router v3.3 started")
     log.info(f"  Source     : {SOURCE_DIR}")
     log.info(f"  Dest       : {DEST_PHOTOS}")
     log.info(f"  PUBLIC.MDB : {PUBLIC_MDB}")
@@ -345,6 +351,7 @@ def main() -> None:
 
     file_queue: queue.Queue = queue.Queue()
 
+    # Single daemon worker processes files one at a time
     worker_thread = threading.Thread(target=worker, args=(file_queue,), name="Worker", daemon=True)
     worker_thread.start()
 
@@ -363,6 +370,7 @@ def main() -> None:
         observer.stop()
         observer.join()
 
+        # Drain the queue before exiting so no image is lost
         remaining = file_queue.qsize()
         if remaining:
             log.info(f"Waiting for {remaining} remaining file(s)...")
