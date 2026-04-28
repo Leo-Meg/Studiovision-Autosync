@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import win32api, win32con
 
 
 # win32com is Windows-only
@@ -188,24 +189,16 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         log.error(f"DB insert failed: {e}")
         return False
     
-def refresh_active_form() -> None:
-    # Requery the active Access form so the new document shows up without restarting.
-    # acCmdRefresh (18) forces a full requery of the form and its subforms.
+def refresh_by_keypress() -> None:
     if not WIN32_AVAILABLE:
         return
-
     try:
         access = win32com.client.GetActiveObject("Access.Application")
-        form   = access.Screen.ActiveForm
-        if form is None:
-            log.warning("Refresh: no active form found.")
-            return
-
-        access.DoCmd.RunCommand(18)
-        log.info("Form refreshed (acCmdRefresh).")
-
+        # Shift+F9 = requery natif Access, équivalent à DoCmd.Requery
+        access.SendKeys("+{F9}")
+        log.info("Shift+F9 envoyé via SendKeys.")
     except Exception as e:
-        log.warning(f"Form refresh failed (non-blocking): {e}")
+        log.warning(f"Keypress refresh échoué (non bloquant) : {e}")
 
 
 def wait_for_file(file: Path) -> bool:
@@ -321,7 +314,8 @@ def worker(file_queue: queue.Queue) -> None:
             description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
 
             insert_document(patient, relative_path, description)
-            refresh_active_form()
+            time.sleep(0.5)  
+            refresh_by_keypress()
 
             file_queue.task_done()
 
