@@ -226,7 +226,7 @@ def deplacer_vers(source: Path, dossier_dest: Path, label: str = "") -> Path | N
     try:
         shutil.move(str(source), str(dest))
         tag = f"[{label}]  " if label else ""
-        log.info(f"✅  {tag}{source.name}  ->  {dest}")
+        log.info(f"{tag}{source.name}  ->  {dest}")
         return dest
     except Exception as e:
         log.error(f"Move failed: {e}")
