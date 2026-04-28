@@ -169,7 +169,7 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         conn   = db_connect(target_mdb)
         cursor = conn.cursor()
 
-        log.info("Tentative d'insertion (INSERT)...")
+        log.info("Attempting DB insert...")
         cursor.execute(
             """
             INSERT INTO Documents
@@ -187,6 +187,25 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
     except Exception as e:
         log.error(f"DB insert failed: {e}")
         return False
+    
+def refresh_active_form() -> None:
+    # Requery the active Access form so the new document shows up without restarting.
+    # acCmdRefresh (18) forces a full requery of the form and its subforms.
+    if not WIN32_AVAILABLE:
+        return
+
+    try:
+        access = win32com.client.GetActiveObject("Access.Application")
+        form   = access.Screen.ActiveForm
+        if form is None:
+            log.warning("Refresh: no active form found.")
+            return
+
+        access.DoCmd.RunCommand(18)
+        log.info("Form refreshed (acCmdRefresh).")
+
+    except Exception as e:
+        log.warning(f"Form refresh failed (non-blocking): {e}")
 
 
 def wait_for_file(file: Path) -> bool:
@@ -302,6 +321,7 @@ def worker(file_queue: queue.Queue) -> None:
             description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
 
             insert_document(patient, relative_path, description)
+            refresh_active_form()
 
             file_queue.task_done()
 
