@@ -26,11 +26,11 @@ except ImportError:
     PYODBC_AVAILABLE = False
 
 
-SOURCE_DIR  = Path(r"C:\Users\Box-6\Desktop\Images partagées test")
-ORPHAN_DIR  = Path(r"C:\Users\Box-6\Desktop\Images_Oubliées")
-DEST_PHOTOS = Path(r"M:\PHOTOS")
-PUBLIC_MDB  = Path(r"M:\fichier\PUBLIC.MDB")
-DOCUM_MDB   = Path(r"M:\fichier\DOCUM.MDB")
+SOURCE_DIR  = Path(r"??")
+ORPHAN_DIR  = Path(r"??")
+DEST_PHOTOS = Path(r"??")
+PUBLIC_MDB  = Path(r"??")
+DOCUM_MDB   = Path(r"??")
 
 WATCHED_EXTENSIONS     = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
 FILE_LOCK_RETRY_DELAY  = 3    # seconds between lock-check retries
