@@ -33,24 +33,24 @@ PUBLIC_MDB  = Path(r"??")
 # File types to watch
 WATCHED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
 
-# How long to retry a locked file (15 attempts x 3s = 45s max)
+# Retry settings for locked files (15 x 3s = 45s max)
 FILE_LOCK_RETRY_DELAY  = 3
 FILE_LOCK_MAX_ATTEMPTS = 15
 
-# How long to wait for a patient to be opened in Access (poll every 3s, give up after 15min)
+# Patient polling settings (every 3s, give up after 15min)
 PATIENT_POLL_INTERVAL = 3
 PATIENT_WAIT_TIMEOUT  = 900
 
-# How many characters to take from last name and first name to build the folder pattern
+# Characters used to build the patient folder name
 NOM_CHARS    = 4
 PRENOM_CHARS = 3
 
-# Field names as they appear in the StudioVision Access form
+# Field names in the StudioVision Access form
 ACCESS_FIELD_CODE   = "Code patient"
 ACCESS_FIELD_NOM    = "NOM"
 ACCESS_FIELD_PRENOM = "Prénom"
 
-# Description written to the DB per file type
+# Description inserted in DB per file type
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
@@ -74,49 +74,41 @@ logging.basicConfig(
 log = logging.getLogger("image_router")
 
 
-def normaliser(texte: str) -> str:
-    nfkd = unicodedata.normalize("NFKD", texte)
+def normalise(text: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", text)
     return "".join(c for c in nfkd if not unicodedata.combining(c)).lower().strip()
 
 
-def construire_motif(patient: dict) -> str:
-    # Build the patient folder name: code + 4 chars of last name + 3 chars of first name
+def build_folder_pattern(patient: dict) -> str:
     code   = str(patient["code"])
-    nom    = normaliser(patient["nom"])[:NOM_CHARS]
-    prenom = normaliser(patient["prenom"])[:PRENOM_CHARS]
+    nom    = normalise(patient["nom"])[:NOM_CHARS]
+    prenom = normalise(patient["prenom"])[:PRENOM_CHARS]
     return f"{code}{nom}.{prenom}"
 
 
-def get_patient_actif() -> dict | None:
+def get_active_patient() -> dict | None:
     if not WIN32_AVAILABLE:
-        log.debug("win32com unavailable (non-Windows).")
+        log.debug("win32com unavailable.")
         return None
 
     try:
         access = win32com.client.GetActiveObject("Access.Application")
-        print("[DEBUG] Access instance found")
-
         form = access.Screen.ActiveForm
         if form is None:
-            print("[DEBUG] No active form")
             return None
 
-        print(f"[DEBUG] Active form: {form.Name}")
-
-        champs_cibles = {ACCESS_FIELD_CODE, ACCESS_FIELD_NOM, ACCESS_FIELD_PRENOM}
+        target_fields = {ACCESS_FIELD_CODE, ACCESS_FIELD_NOM, ACCESS_FIELD_PRENOM}
         data: dict = {}
 
         for i in range(form.Controls.Count):
             ctrl = form.Controls(i)
             try:
-                if str(ctrl.Name) in champs_cibles:
+                if str(ctrl.Name) in target_fields:
                     data[ctrl.Name] = ctrl.Value
-                    print(f"[DEBUG]   {ctrl.Name} = {ctrl.Value}")
             except Exception:
                 pass
 
-        if not champs_cibles.issubset(data.keys()):
-            print(f"[DEBUG] Missing fields: {champs_cibles - data.keys()}")
+        if not target_fields.issubset(data.keys()):
             return None
 
         return {
@@ -126,46 +118,84 @@ def get_patient_actif() -> dict | None:
         }
 
     except Exception as e:
-        print(f"[DEBUG] COM error: {e}")
+        log.debug(f"COM error: {e}")
         return None
 
 
-def trouver_dossier_patient(patient: dict, motif: str) -> Path | None:
+def find_folder_from_db(patient: dict) -> Path | None:
+    # Look up an existing document for this patient to extract their folder path.
+    if not PYODBC_AVAILABLE or not PUBLIC_MDB.exists():
+        return None
+
+    try:
+        conn = pyodbc.connect(
+            f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={PUBLIC_MDB};"
+        )
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT TOP 1 [Photo externe] FROM Documents "
+            "WHERE [code patient] = ? AND [Photo externe] IS NOT NULL",
+            (int(patient["code"]),)
+        )
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row or not row[0]:
+            log.info(f"No existing document for patient {patient['code']}")
+            return None
+
+        # Photo externe format: \17.000\1758506693bon.eri\image.jpg
+        parts = row[0].strip().strip("\\").split("\\")
+        if len(parts) >= 2:
+            folder = DEST_PHOTOS / parts[0] / parts[1]
+            if folder.is_dir():
+                log.info(f"Folder found via DB: {folder}")
+                return folder
+            log.warning(f"DB path found but folder missing on disk: {folder}")
+
+        return None
+
+    except Exception as e:
+        log.error(f"DB folder lookup failed: {e}")
+        return None
+
+
+def find_folder_on_disk(patient: dict, pattern: str) -> Path | None:
+    # Fallback: scan all group folders when DB lookup fails.
     if not DEST_PHOTOS.exists():
         log.error(f"Network drive unreachable: {DEST_PHOTOS}")
         return None
 
     try:
         code_int      = int(patient["code"])
-        numero_groupe = abs(code_int) // 1000
-        groupe_nom    = f"{numero_groupe:02d}.000"
-        candidat      = DEST_PHOTOS / groupe_nom / motif
+        group_number  = abs(code_int) // 1000
+        group_name    = f"{group_number:02d}.000"
+        candidate     = DEST_PHOTOS / group_name / pattern
 
-        if candidat.is_dir():
-            log.info(f"[Fast Path] Found -> {candidat}")
-            return candidat
+        if candidate.is_dir():
+            log.info(f"Fast path found: {candidate}")
+            return candidate
 
-        log.debug(f"[Fast Path] '{candidat}' not found -> Fallback")
+        log.debug(f"Fast path miss, scanning...")
 
-    except (ValueError, TypeError) as e:
-        log.debug(f"[Fast Path] Non-numeric code '{patient['code']}' ({e}) -> Fallback")
+    except (ValueError, TypeError):
+        pass
 
-    log.info(f"[Fallback] Scanning {DEST_PHOTOS} for '{motif}'...")
-    for groupe in DEST_PHOTOS.iterdir():
-        if not groupe.is_dir():
+    for group in DEST_PHOTOS.iterdir():
+        if not group.is_dir():
             continue
-        candidat = groupe / motif
-        if candidat.is_dir():
-            log.info(f"[Fallback] Found -> {candidat}")
-            return candidat
+        candidate = group / pattern
+        if candidate.is_dir():
+            log.info(f"Fallback found: {candidate}")
+            return candidate
 
-    log.warning(f"No folder found for '{motif}'")
+    log.warning(f"No folder found for '{pattern}'")
     return None
 
 
-def inserer_document(patient: dict, chemin_relatif: str, description: str) -> bool:
+def insert_document(patient: dict, relative_path: str, description: str) -> bool:
     if not PYODBC_AVAILABLE:
-        log.warning("pyodbc unavailable — DB insert skipped.")
+        log.warning("pyodbc unavailable, DB insert skipped.")
         return False
 
     if not PUBLIC_MDB.exists():
@@ -173,7 +203,9 @@ def inserer_document(patient: dict, chemin_relatif: str, description: str) -> bo
         return False
 
     try:
-        conn   = pyodbc.connect(f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={PUBLIC_MDB};")
+        conn   = pyodbc.connect(
+            f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={PUBLIC_MDB};"
+        )
         cursor = conn.cursor()
 
         cursor.execute("SELECT MAX(NUMDOC) FROM Documents")
@@ -186,145 +218,146 @@ def inserer_document(patient: dict, chemin_relatif: str, description: str) -> bo
                 (NUMDOC, [code patient], Date, DESCRIPTIONS, TEXTE, [Photo externe], TypeVW, NumDocExterne)
             VALUES (?, ?, ?, ?, NULL, ?, 99, NULL)
             """,
-            (numdoc, int(patient["code"]), datetime.now(), description, chemin_relatif)
+            (numdoc, int(patient["code"]), datetime.now(), description, relative_path)
         )
         conn.commit()
         conn.close()
 
-        log.info(f"[DB] INSERT OK — NUMDOC={numdoc}  patient={patient['code']}  path='{chemin_relatif}'")
+        log.info(f"DB insert OK: NUMDOC={numdoc} patient={patient['code']} path='{relative_path}'")
         return True
 
     except Exception as e:
-        log.error(f"[DB] INSERT failed: {e}")
+        log.error(f"DB insert failed: {e}")
         return False
 
 
-def attendre_disponibilite(fichier: Path) -> bool:
-    for tentative in range(1, FILE_LOCK_MAX_ATTEMPTS + 1):
+def wait_for_file(file: Path) -> bool:
+    for attempt in range(1, FILE_LOCK_MAX_ATTEMPTS + 1):
         try:
-            with fichier.open("rb"):
+            with file.open("rb"):
                 return True
         except (PermissionError, OSError):
-            log.debug(f"File locked ({tentative}/{FILE_LOCK_MAX_ATTEMPTS}), retrying in {FILE_LOCK_RETRY_DELAY}s...")
+            log.debug(f"File locked ({attempt}/{FILE_LOCK_MAX_ATTEMPTS}), retrying...")
             time.sleep(FILE_LOCK_RETRY_DELAY)
 
-    log.error(f"File still locked after {FILE_LOCK_MAX_ATTEMPTS} attempts: {fichier}")
+    log.error(f"File still locked after {FILE_LOCK_MAX_ATTEMPTS} attempts: {file}")
     return False
 
 
-def deplacer_vers(source: Path, dossier_dest: Path, label: str = "") -> Path | None:
-    dossier_dest.mkdir(parents=True, exist_ok=True)
-    dest = dossier_dest / source.name
+def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
+    dest_folder.mkdir(parents=True, exist_ok=True)
+    dest = dest_folder / source.name
 
     if dest.exists():
         ts   = int(time.time())
-        dest = dossier_dest / f"{source.stem}_{ts}{source.suffix}"
-        log.info(f"Name conflict -> renamed to {dest.name}")
+        dest = dest_folder / f"{source.stem}_{ts}{source.suffix}"
+        log.info(f"Name conflict, renamed to {dest.name}")
 
     try:
         shutil.move(str(source), str(dest))
         tag = f"[{label}]  " if label else ""
-        log.info(f"{tag}{source.name}  ->  {dest}")
+        log.info(f"{tag}{source.name} -> {dest}")
         return dest
     except Exception as e:
         log.error(f"Move failed: {e}")
         return None
 
 
-def orpheliner(fichier: Path) -> None:
-    log.warning(f"Timeout reached — orphaning: {fichier.name}")
-    deplacer_vers(fichier, ORPHAN_DIR, label="ORPHAN")
+def orphan_file(file: Path) -> None:
+    log.warning(f"Orphaning: {file.name}")
+    move_file(file, ORPHAN_DIR, label="ORPHAN")
 
 
 def worker(file_queue: queue.Queue) -> None:
-    # ← FIX : initialiser COM pour ce thread
+    # Initialize COM for this thread.
     pythoncom.CoInitialize()
-    log.info("Worker started — waiting for images...")
+    log.info("Worker started.")
 
     try:
         while True:
             try:
-                fichier: Path = file_queue.get()
+                file: Path = file_queue.get()
             except Exception as e:
-                log.error(f"Queue read error: {e}")
+                log.error(f"Queue error: {e}")
                 continue
 
-            log.info(f"Processing: {fichier.name}  ({file_queue.qsize()} pending)")
+            log.info(f"Processing: {file.name} ({file_queue.qsize()} pending)")
 
-            if not fichier.exists():
-                log.warning(f"File gone before processing: {fichier}")
+            if not file.exists():
+                log.warning(f"File gone before processing: {file}")
                 file_queue.task_done()
                 continue
 
-            # Step 1: wait until the device has finished writing the file
-            if not attendre_disponibilite(fichier):
-                log.error(f"Aborting (persistent lock): {fichier.name}")
+            # Wait until the file is fully written and unlocked.
+            if not wait_for_file(file):
+                log.error(f"Aborting, persistent lock: {file.name}")
                 file_queue.task_done()
                 continue
 
-            # Step 2: poll Access until a patient is open, or timeout after 15min
+            # Poll Access until a patient is open or timeout.
             patient       = None
-            debut_attente = time.monotonic()
-            premier_log   = True
+            start_time    = time.monotonic()
+            first_log     = True
 
             while True:
-                patient = get_patient_actif()
+                patient = get_active_patient()
 
                 if patient:
                     break
 
-                temps_ecoule = time.monotonic() - debut_attente
+                elapsed = time.monotonic() - start_time
 
-                if temps_ecoule >= PATIENT_WAIT_TIMEOUT:
-                    orpheliner(fichier)
+                if elapsed >= PATIENT_WAIT_TIMEOUT:
+                    orphan_file(file)
                     file_queue.task_done()
                     patient = None
                     break
 
-                if premier_log:
-                    log.info(f"No patient open — waiting (timeout in {PATIENT_WAIT_TIMEOUT // 60} min)")
-                    premier_log = False
-                else:
-                    log.debug(f"Still waiting... ({(PATIENT_WAIT_TIMEOUT - temps_ecoule) / 60:.1f} min left)")
+                if first_log:
+                    log.info(f"No patient open, waiting (timeout in {PATIENT_WAIT_TIMEOUT // 60} min)")
+                    first_log = False
 
                 time.sleep(PATIENT_POLL_INTERVAL)
 
             if patient is None:
                 continue
 
-            # Step 3: build the patient folder name pattern
-            motif = construire_motif(patient)
-            log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']}) -> '{motif}'")
+            pattern = build_folder_pattern(patient)
+            log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']}) -> '{pattern}'")
 
-            # Step 4: find the folder on disk
-            dossier_patient = trouver_dossier_patient(patient, motif)
-            if not dossier_patient:
-                log.error(f"Folder '{motif}' not found. Orphaning.")
-                orpheliner(fichier)
+            # Find the patient folder: DB lookup first, disk scan as fallback.
+            patient_folder = find_folder_from_db(patient)
+            if not patient_folder:
+                log.info("DB lookup failed, falling back to disk scan.")
+                patient_folder = find_folder_on_disk(patient, pattern)
+
+            if not patient_folder:
+                log.error(f"Folder not found for '{pattern}'. Orphaning.")
+                orphan_file(file)
                 file_queue.task_done()
                 continue
 
-            # Step 5: move the image into the patient folder
-            dest = deplacer_vers(fichier, dossier_patient)
+            # Move the image into the patient folder.
+            dest = move_file(file, patient_folder)
             if dest is None:
                 file_queue.task_done()
                 continue
 
-            # Step 6: insert a row in PUBLIC.MDB so StudioVision can see the image
-            groupe_reel    = dossier_patient.parent.name
-            chemin_relatif = f"\\{groupe_reel}\\{motif}\\{dest.name}"
-            description    = EXAM_DESCRIPTION.get(fichier.suffix.lower(), "Image")
+            # Insert a row in Documents so StudioVision can display the image.
+            group_name    = patient_folder.parent.name
+            relative_path = f"\\{group_name}\\{patient_folder.name}\\{dest.name}"
+            description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
 
-            inserer_document(patient, chemin_relatif, description)
+            insert_document(patient, relative_path, description)
 
             file_queue.task_done()
 
     finally:
-        # ← FIX : nettoyer COM proprement à la fin du thread
         pythoncom.CoUninitialize()
 
 
 class ImageProducer(FileSystemEventHandler):
+
     def __init__(self, file_queue: queue.Queue) -> None:
         super().__init__()
         self._queue = file_queue
@@ -333,14 +366,13 @@ class ImageProducer(FileSystemEventHandler):
         if event.is_directory:
             return
 
-        fichier = Path(event.src_path)
+        file = Path(event.src_path)
 
-        if fichier.suffix.lower() not in WATCHED_EXTENSIONS:
-            log.debug(f"Ignored (extension not watched): {fichier.name}")
+        if file.suffix.lower() not in WATCHED_EXTENSIONS:
             return
 
-        log.info(f"Enqueued: {fichier.name}  (queue -> {self._queue.qsize() + 1} item(s))")
-        self._queue.put(fichier)
+        log.info(f"Enqueued: {file.name} (queue size: {self._queue.qsize() + 1})")
+        self._queue.put(file)
 
 
 def main() -> None:
@@ -350,7 +382,7 @@ def main() -> None:
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Image Router v3.0 started")
+    log.info("Image Router v3.1 started")
     log.info(f"  Source   : {SOURCE_DIR}")
     log.info(f"  Dest     : {DEST_PHOTOS}")
     log.info(f"  Database : {PUBLIC_MDB}")
@@ -362,13 +394,12 @@ def main() -> None:
 
     worker_thread = threading.Thread(target=worker, args=(file_queue,), name="Worker", daemon=True)
     worker_thread.start()
-    log.info("Worker thread started.")
 
     producer = ImageProducer(file_queue)
     observer = Observer()
     observer.schedule(producer, str(SOURCE_DIR), recursive=True)
     observer.start()
-    log.info("Watchdog observer started. Press Ctrl+C to stop.")
+    log.info("Watching for images. Press Ctrl+C to stop.")
 
     try:
         while observer.is_alive():
@@ -381,7 +412,7 @@ def main() -> None:
 
         remaining = file_queue.qsize()
         if remaining:
-            log.info(f"Waiting for {remaining} remaining image(s)...")
+            log.info(f"Waiting for {remaining} remaining file(s)...")
             file_queue.join()
 
         log.info("Image Router stopped.")
