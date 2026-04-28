@@ -154,13 +154,16 @@ def find_patient_folder(patient_code: str) -> Path | None:
 
 
 def insert_document(patient: dict, relative_path: str, description: str) -> bool:
-    # Insert one row in DOCUM.MDB (or PUBLIC.MDB as fallback) so StudioVision shows the image.
-    # Uses TOP 1 ORDER BY NUMDOC DESC instead of MAX(NUMDOC) to avoid the ODBC -1011 error
-    # on large tables where MAX() triggers a full scan.
+    # Insert a new row in DOCUM.MDB > DOCUMENTS.
+    # If DOCUM.MDB is empty or unavailable, fall back to PUBLIC.MDB.
+    #
+    # NOTE: [Date] must be bracketed — "Date" is a reserved word in Access SQL
+    # and causes unpredictable ODBC crashes when used unquoted.
     if not PYODBC_AVAILABLE:
         log.warning("pyodbc not available, insert skipped.")
         return False
 
+    # Determine which MDB to write to.
     target_mdb = DOCUM_MDB if DOCUM_MDB.exists() else PUBLIC_MDB
 
     if not target_mdb.exists():
@@ -171,14 +174,18 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         conn   = db_connect(target_mdb)
         cursor = conn.cursor()
 
-        cursor.execute("SELECT TOP 1 NUMDOC FROM Documents ORDER BY NUMDOC DESC")
+        log.info("Tentative de lecture du MAX NUMDOC...")
+        cursor.execute(
+            "SELECT TOP 1 NUMDOC FROM Documents ORDER BY NUMDOC DESC"
+        )
         row    = cursor.fetchone()
         numdoc = int(row[0] if row and row[0] is not None else 0) + 1
 
+        log.info(f"Lecture réussie. NUMDOC calculé = {numdoc}. Tentative d'insertion (INSERT)...")
         cursor.execute(
             """
             INSERT INTO Documents
-                (NUMDOC, [code patient], Date, DESCRIPTIONS, TEXTE, [Photo externe], TypeVW, NumDocExterne)
+                (NUMDOC, [code patient], [Date], DESCRIPTIONS, TEXTE, [Photo externe], TypeVW, NumDocExterne)
             VALUES (?, ?, ?, ?, NULL, ?, 99, NULL)
             """,
             (numdoc, int(patient["code"]), datetime.now(), description, relative_path)
