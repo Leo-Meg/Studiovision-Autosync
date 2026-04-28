@@ -134,7 +134,6 @@ def find_patient_folder(patient_code: str) -> Path | None:
             log.warning(f"No existing document found for patient {patient_code}.")
             return None
 
-        # Photo externe format: \17.000\1758506693bon.eri\filename.jpg
         parts = row[0].strip().strip("\\").split("\\")
         if len(parts) < 2:
             log.error(f"Unexpected Photo externe format: {row[0]}")
