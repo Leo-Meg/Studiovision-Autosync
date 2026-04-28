@@ -1,0 +1,8 @@
+# Ignore data files
+data_raw/
+
+# Ignore model files
+bdd/
+
+# Ignore test files
+tests/
