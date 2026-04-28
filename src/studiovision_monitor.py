@@ -189,16 +189,50 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         log.error(f"DB insert failed: {e}")
         return False
     
-def refresh_by_keypress() -> None:
+def refresh_by_navigate() -> None:
     if not WIN32_AVAILABLE:
         return
     try:
         access = win32com.client.GetActiveObject("Access.Application")
-        # Shift+F9 = requery natif Access, équivalent à DoCmd.Requery
-        access.SendKeys("+{F9}")
-        log.info("Shift+F9 envoyé via SendKeys.")
+        form   = access.Screen.ActiveForm
+        if form is None:
+            log.warning("Refresh: aucun formulaire actif trouvé.")
+            return
+
+        # Mémoriser le code patient actuel
+        patient_code = None
+        for i in range(form.Controls.Count):
+            ctrl = form.Controls(i)
+            try:
+                if str(ctrl.Name) == ACCESS_FIELD_CODE:
+                    patient_code = ctrl.Value
+                    break
+            except Exception:
+                pass
+
+        if patient_code is None:
+            log.warning("Refresh: code patient introuvable, abandon.")
+            return
+
+        # Quitter et revenir sur le patient — imite le geste utilisateur
+        access.DoCmd.RunCommand(36)   # acCmdRecordsGoToLast
+        time.sleep(0.5)
+        access.DoCmd.RunCommand(27)   # acCmdRecordsGoToPrevious
+        time.sleep(0.5)
+        # Revenir précisément sur le bon patient via FindRecord
+        access.DoCmd.FindRecord(
+            patient_code,   # valeur cherchée
+            0,              # acEntire — correspondance exacte
+            False,          # MatchCase
+            -1,             # acSearchAll — cherche dans tout le recordset
+            False,          # SearchAsFormatted
+            1,              # acCurrent — cherche dans le champ actif
+            True            # FindFirst
+        )
+        log.info(f"Refresh par navigation OK, retour patient {patient_code}.")
+
     except Exception as e:
-        log.warning(f"Keypress refresh échoué (non bloquant) : {e}")
+        log.warning(f"Refresh navigation échoué (non bloquant) : {e}")
 
 
 def wait_for_file(file: Path) -> bool:
@@ -314,8 +348,8 @@ def worker(file_queue: queue.Queue) -> None:
             description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
 
             insert_document(patient, relative_path, description)
-            time.sleep(0.5)  
-            refresh_by_keypress()
+            time.sleep(0.5)
+            refresh_by_navigate()
 
             file_queue.task_done()
 
