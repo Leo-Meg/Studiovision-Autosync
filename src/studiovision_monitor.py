@@ -9,7 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import win32api, win32con
+import win32gui
+import win32con
+import win32api
 
 
 # win32com is Windows-only
@@ -189,50 +191,26 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         log.error(f"DB insert failed: {e}")
         return False
     
-def refresh_by_navigate() -> None:
+def refresh_by_keypress() -> None:
     if not WIN32_AVAILABLE:
         return
     try:
         access = win32com.client.GetActiveObject("Access.Application")
-        form   = access.Screen.ActiveForm
-        if form is None:
-            log.warning("Refresh: aucun formulaire actif trouvé.")
-            return
+        hwnd   = access.hWndAccessApp()
 
-        # Mémoriser le code patient actuel
-        patient_code = None
-        for i in range(form.Controls.Count):
-            ctrl = form.Controls(i)
-            try:
-                if str(ctrl.Name) == ACCESS_FIELD_CODE:
-                    patient_code = ctrl.Value
-                    break
-            except Exception:
-                pass
+        # Forcer Access au premier plan avant d'envoyer la touche
+        win32gui.SetForegroundWindow(hwnd)
+        time.sleep(0.3)  # laisser Windows traiter le changement de focus
 
-        if patient_code is None:
-            log.warning("Refresh: code patient introuvable, abandon.")
-            return
+        # Shift+F9 via win32api directement sur la fenêtre Access
+        win32api.keybd_event(win32con.VK_SHIFT, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_F9, 0, 0, 0)
+        win32api.keybd_event(win32con.VK_F9, 0, win32con.KEYEVENTF_KEYUP, 0)
+        win32api.keybd_event(win32con.VK_SHIFT, 0, win32con.KEYEVENTF_KEYUP, 0)
 
-        # Quitter et revenir sur le patient — imite le geste utilisateur
-        access.DoCmd.RunCommand(36)   # acCmdRecordsGoToLast
-        time.sleep(0.5)
-        access.DoCmd.RunCommand(27)   # acCmdRecordsGoToPrevious
-        time.sleep(0.5)
-        # Revenir précisément sur le bon patient via FindRecord
-        access.DoCmd.FindRecord(
-            patient_code,   # valeur cherchée
-            0,              # acEntire — correspondance exacte
-            False,          # MatchCase
-            -1,             # acSearchAll — cherche dans tout le recordset
-            False,          # SearchAsFormatted
-            1,              # acCurrent — cherche dans le champ actif
-            True            # FindFirst
-        )
-        log.info(f"Refresh par navigation OK, retour patient {patient_code}.")
-
+        log.info("Shift+F9 envoyé avec focus forcé.")
     except Exception as e:
-        log.warning(f"Refresh navigation échoué (non bloquant) : {e}")
+        log.warning(f"Keypress refresh échoué (non bloquant) : {e}")
 
 
 def wait_for_file(file: Path) -> bool:
@@ -349,7 +327,7 @@ def worker(file_queue: queue.Queue) -> None:
 
             insert_document(patient, relative_path, description)
             time.sleep(0.5)
-            refresh_by_navigate()
+            refresh_by_keypress()
 
             file_queue.task_done()
 
