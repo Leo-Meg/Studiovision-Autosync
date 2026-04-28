@@ -87,19 +87,20 @@ def construire_motif(patient: dict) -> str:
 
 
 def get_patient_actif() -> dict | None:
-    # Read the currently open patient from the StudioVision Access form via COM.
-    # Returns a dict or None if Access is not open / no patient is displayed.
-    # To test on Mac: uncomment the mock return below.
     if not WIN32_AVAILABLE:
-
         log.debug("win32com unavailable (non-Windows).")
         return None
 
     try:
         access = win32com.client.GetActiveObject("Access.Application")
-        form   = access.Screen.ActiveForm
+        print("[DEBUG] Access instance found")
+
+        form = access.Screen.ActiveForm
         if form is None:
+            print("[DEBUG] No active form")
             return None
+
+        print(f"[DEBUG] Active form: {form.Name}")
 
         champs_cibles = {ACCESS_FIELD_CODE, ACCESS_FIELD_NOM, ACCESS_FIELD_PRENOM}
         data: dict = {}
@@ -109,11 +110,13 @@ def get_patient_actif() -> dict | None:
             try:
                 if str(ctrl.Name) in champs_cibles:
                     data[ctrl.Name] = ctrl.Value
+                    print(f"[DEBUG]   {ctrl.Name} = {ctrl.Value}")  # confirm each target field is read
             except Exception:
-                pass  # labels and buttons have no .Value
+                pass
 
         if not champs_cibles.issubset(data.keys()):
-            return None  # open form is not the patient form
+            print(f"[DEBUG] Missing fields: {champs_cibles - data.keys()}")  # shows which fields were not found
+            return None
 
         return {
             "code":   str(data[ACCESS_FIELD_CODE]),
@@ -122,7 +125,7 @@ def get_patient_actif() -> dict | None:
         }
 
     except Exception as e:
-        log.debug(f"COM Access unavailable: {e}")
+        print(f"[DEBUG] COM error: {e}")
         return None
 
 
