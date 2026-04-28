@@ -154,16 +154,11 @@ def find_patient_folder(patient_code: str) -> Path | None:
 
 
 def insert_document(patient: dict, relative_path: str, description: str) -> bool:
-    # Insert a new row in DOCUM.MDB > DOCUMENTS.
-    # If DOCUM.MDB is empty or unavailable, fall back to PUBLIC.MDB.
-    #
-    # NOTE: [Date] must be bracketed — "Date" is a reserved word in Access SQL
-    # and causes unpredictable ODBC crashes when used unquoted.
+    # Insert a new row in DOCUM.MDB > DOCUMENTS
     if not PYODBC_AVAILABLE:
         log.warning("pyodbc not available, insert skipped.")
         return False
 
-    # Determine which MDB to write to.
     target_mdb = DOCUM_MDB if DOCUM_MDB.exists() else PUBLIC_MDB
 
     if not target_mdb.exists():
@@ -174,26 +169,19 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         conn   = db_connect(target_mdb)
         cursor = conn.cursor()
 
-        log.info("Tentative de lecture du MAX NUMDOC...")
-        cursor.execute(
-            "SELECT TOP 1 NUMDOC FROM Documents ORDER BY NUMDOC DESC"
-        )
-        row    = cursor.fetchone()
-        numdoc = int(row[0] if row and row[0] is not None else 0) + 1
-
-        log.info(f"Lecture réussie. NUMDOC calculé = {numdoc}. Tentative d'insertion (INSERT)...")
+        log.info("Tentative d'insertion (INSERT)...")
         cursor.execute(
             """
             INSERT INTO Documents
-                (NUMDOC, [code patient], [Date], DESCRIPTIONS, TEXTE, [Photo externe], TypeVW, NumDocExterne)
-            VALUES (?, ?, ?, ?, NULL, ?, 99, NULL)
+                ([code patient], [Date], DESCRIPTIONS, TEXTE, [Photo externe], TypeVW, NumDocExterne)
+            VALUES (?, ?, ?, ?, ?, 99, NULL)
             """,
-            (numdoc, int(patient["code"]), datetime.now(), description, relative_path)
+            (int(patient["code"]), datetime.now(), description, relative_path, relative_path)
         )
         conn.commit()
         conn.close()
 
-        log.info(f"Insert OK: NUMDOC={numdoc} patient={patient['code']} path='{relative_path}' db={target_mdb.name}")
+        log.info(f"Insert OK: patient={patient['code']} path='{relative_path}' db={target_mdb.name}")
         return True
 
     except Exception as e:
