@@ -29,7 +29,7 @@ DEST_PHOTOS = Path(r"??")
 PUBLIC_MDB  = Path(r"??")
 DOCUM_MDB   = Path(r"??")
 
-WATCHED_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
+WATCHED_EXTENSIONS     = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
 FILE_LOCK_RETRY_DELAY  = 3
 FILE_LOCK_MAX_ATTEMPTS = 15
 PATIENT_POLL_INTERVAL  = 3
@@ -45,7 +45,6 @@ SFDOC_SUBFORM_NAME = "SFDoc"
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
-    ".jfif": "Image",
     ".png":  "Image",
     ".bmp":  "Image",
     ".tif":  "OCT",
@@ -144,29 +143,17 @@ def find_patient_folder(patient_code: str) -> Path | None:
 
 
 def insert_document(patient: dict, relative_path: str, description: str) -> bool:
-    """
-    Insert a document record exclusively into DOCUM_MDB.
-
-    No fallback to PUBLIC_MDB is attempted under any circumstances.
-    If DOCUM_MDB is unreachable (network hiccup, file locked, etc.) the
-    function logs a detailed error and returns False so the caller can
-    orphan the image safely.
-    """
     if not PYODBC_AVAILABLE:
-        log.error("pyodbc not available — insert aborted.")
+        log.warning("pyodbc not available, insert skipped.")
         return False
 
-    # DOCUM_MDB must exist and be reachable
-    if not DOCUM_MDB.exists():
-        log.error(
-            f"DOCUM_MDB not found or unreachable: {DOCUM_MDB}  "
-            f"Insert ABORTED — image will be orphaned. "
-            f"(PUBLIC_MDB is never used as a fallback.)"
-        )
+    target_mdb = DOCUM_MDB if DOCUM_MDB.exists() else PUBLIC_MDB
+    if not target_mdb.exists():
+        log.error("No writable MDB found.")
         return False
 
     try:
-        conn   = db_connect(DOCUM_MDB)
+        conn   = db_connect(target_mdb)
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -178,19 +165,10 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         )
         conn.commit()
         conn.close()
-        log.info(
-            f"Insert OK: patient={patient['code']} "
-            f"path='{relative_path}' db={DOCUM_MDB.name}"
-        )
+        log.info(f"Insert OK: patient={patient['code']} path='{relative_path}' db={target_mdb.name}")
         return True
-
     except Exception as e:
-        # Covers network errors ("System resource exceeded"), locked files,
-        # driver errors, integrity violations, etc.
-        log.error(
-            f"Insert FAILED in {DOCUM_MDB.name}: {e}  "
-            f"No fallback attempted — image will be orphaned."
-        )
+        log.error(f"DB insert failed: {e}")
         return False
 
 
@@ -361,14 +339,7 @@ def worker(file_queue: queue.Queue) -> None:
                 time.sleep(1.5)
                 refresh_ui()
             else:
-                # Insert failed: orphan the already-moved file
-                # The file was moved to patient_folder before the insert attempt.
-                # We orphan it from there so it is never silently lost.
-                log.error(
-                    "Insert failed moving already-copied file to orphan folder "
-                    "to prevent a ghost image with no DB record."
-                )
-                orphan_file(dest)
+                log.warning("Insert failed, refresh skipped.")
 
             file_queue.task_done()
 
