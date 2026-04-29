@@ -22,26 +22,30 @@ try:
 except ImportError:
     PYODBC_AVAILABLE = False
 
-
+# Configuration 
 SOURCE_DIR  = Path(r"??")
 ORPHAN_DIR  = Path(r"??")
 DEST_PHOTOS = Path(r"??")
 PUBLIC_MDB  = Path(r"??")
 DOCUM_MDB   = Path(r"??")
 
+# Supported image extensions
 WATCHED_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
 FILE_LOCK_RETRY_DELAY  = 3
 FILE_LOCK_MAX_ATTEMPTS = 15
 PATIENT_POLL_INTERVAL  = 3
 PATIENT_WAIT_TIMEOUT   = 900
 
+# Expected field names in the active Access form
 ACCESS_FIELD_CODE   = "Code patient"
 ACCESS_FIELD_NOM    = "NOM"
 ACCESS_FIELD_PRENOM = "Prénom"
 
-# Name of the subform that lists documents — update if the form is renamed
+# Name of the subform that lists documents
 SFDOC_SUBFORM_NAME = "SFDoc"
 
+# Description to use in the database for each file type; 
+# default is "Image" except for TIFF which is "OCT" and DICOM which is "DICOM"
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
@@ -53,6 +57,7 @@ EXAM_DESCRIPTION = {
     ".dcm":  "DICOM",
 }
 
+# Configure logging to file and console with timestamps and thread names
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  [%(threadName)s]  %(message)s",
@@ -64,13 +69,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("image_router")
 
-
+# Helper to connect to an Access MDB with pyodbc, with error handling deferred to caller
 def db_connect(mdb_path: Path):
     return pyodbc.connect(
         f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={mdb_path};"
     )
 
-
+# Returns a dict with patient info if an Access form with the expected fields is active, else None
 def get_active_patient() -> dict | None:
     if not WIN32_AVAILABLE:
         return None
@@ -99,11 +104,13 @@ def get_active_patient() -> dict | None:
             "nom":    str(data[ACCESS_FIELD_NOM]),
             "prenom": str(data[ACCESS_FIELD_PRENOM]),
         }
+        
     except Exception as e:
         log.debug(f"COM error: {e}")
         return None
 
-
+# Uses the PUBLIC.MDB Documents table to resolve the patient's photo folder, 
+# returning a Path if successful or None if any step fails
 def find_patient_folder(patient_code: str) -> Path | None:
     if not PYODBC_AVAILABLE:
         log.error("pyodbc not available.")
@@ -142,11 +149,13 @@ def find_patient_folder(patient_code: str) -> Path | None:
         log.error(f"DB folder lookup failed: {e}")
         return None
 
+# Inserts a new record into PUBLIC.MDB Documents for the given patient, relative path, and description.
 def insert_document(patient: dict, relative_path: str, description: str) -> bool:
     if not PYODBC_AVAILABLE:
         log.warning("pyodbc not available, insert skipped.")
         return False
 
+    # IMPORTANT target_mdb must be PUBLIC.MDB because DOCUM.MDB is read-only for this operation
     target_mdb = PUBLIC_MDB
     if not target_mdb.exists():
         log.error("PUBLIC.MDB not found, insert skipped.")
@@ -172,11 +181,12 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         return False
 
 
-# acSubform constant from the Access object model
+# Access constant for subform control type
 _AC_SUBFORM = 112
 
-
+# Requery the form to show the new document, with a fallback to Refresh() if Requery() is unavailable
 def _requery_form(form) -> None:
+    
     # Recurse into subforms first so their data is fresh before the parent requeried
     for i in range(form.Controls.Count):
         ctrl = form.Controls(i)
@@ -197,10 +207,8 @@ def _requery_form(form) -> None:
         except Exception as e_ref:
             log.warning(f"Refresh() also unavailable on '{form.Name}' ({e_ref})")
 
-
+# After requerying, move to the last record in the document subform to show the newly added document
 def _goto_last_record(form) -> None:
-    # After requery the cursor resets to the first record; move it to the last so
-    # the newly inserted image is already selected when the user clicks Visualiser
     for i in range(form.Controls.Count):
         ctrl = form.Controls(i)
         try:
@@ -214,7 +222,8 @@ def _goto_last_record(form) -> None:
         except Exception as e:
             log.debug(f"MoveLast failed on '{getattr(ctrl, 'Name', '?')}': {e}")
 
-
+# Refreshes the active Access form to show the newly added document, 
+# with error handling to avoid blocking the worker thread if Access is not responsive
 def refresh_ui() -> None:
     if not WIN32_AVAILABLE:
         return
@@ -229,7 +238,7 @@ def refresh_ui() -> None:
     except Exception as e:
         log.warning(f"COM refresh failed (non-blocking): {e}")
 
-
+# Tries to open the file for reading to check if it's still locked by the writing process
 def wait_for_file(file: Path) -> bool:
     for attempt in range(1, FILE_LOCK_MAX_ATTEMPTS + 1):
         try:
@@ -241,7 +250,7 @@ def wait_for_file(file: Path) -> bool:
     log.error(f"File still locked after {FILE_LOCK_MAX_ATTEMPTS} attempts: {file}")
     return False
 
-
+# Moves the file to the destination folder, handling name conflicts by appending a timestamp
 def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
     dest_folder.mkdir(parents=True, exist_ok=True)
     dest = dest_folder / source.name
@@ -260,14 +269,14 @@ def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
         log.error(f"Move failed: {e}")
         return None
 
-
+# Moves the file to the orphan folder with a warning log
 def orphan_file(file: Path) -> None:
     log.warning(f"Orphaning: {file.name}")
     move_file(file, ORPHAN_DIR, label="ORPHAN")
 
-
+# Worker thread function that processes files from the queue, with patient lookup, file moving, 
+# DB insertion, and UI refresh logic
 def worker(file_queue: queue.Queue) -> None:
-    # COM must be initialized on the worker thread, not the main thread
     pythoncom.CoInitialize()
     log.info("Worker started.")
 
@@ -346,7 +355,7 @@ def worker(file_queue: queue.Queue) -> None:
     finally:
         pythoncom.CoUninitialize()
 
-
+# Watchdog event handler that enqueues new image files for processing by the worker thread
 class ImageProducer(FileSystemEventHandler):
     def __init__(self, file_queue: queue.Queue) -> None:
         super().__init__()
@@ -404,7 +413,6 @@ def main() -> None:
             file_queue.join()
 
         log.info("Image Router stopped.")
-
 
 if __name__ == "__main__":
     main()
