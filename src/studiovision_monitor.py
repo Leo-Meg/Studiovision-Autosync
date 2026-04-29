@@ -39,6 +39,9 @@ ACCESS_FIELD_CODE   = "Code patient"
 ACCESS_FIELD_NOM    = "NOM"
 ACCESS_FIELD_PRENOM = "Prénom"
 
+# Name of the subform that lists documents — update if the form is renamed
+SFDOC_SUBFORM_NAME = "SFDoc"
+
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
@@ -169,11 +172,12 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         return False
 
 
-# acSubform constant — used to identify subform controls in the Access object model
+# acSubform constant from the Access object model
 _AC_SUBFORM = 112
 
+
 def _requery_form(form) -> None:
-    # Recurse into subforms first so their data is fresh before the parent requeries
+    # Recurse into subforms first so their data is fresh before the parent requeried
     for i in range(form.Controls.Count):
         ctrl = form.Controls(i)
         try:
@@ -194,6 +198,23 @@ def _requery_form(form) -> None:
             log.warning(f"Refresh() also unavailable on '{form.Name}' ({e_ref})")
 
 
+def _goto_last_record(form) -> None:
+    # After requery the cursor resets to the first record; move it to the last so
+    # the newly inserted image is already selected when the user clicks Visualiser
+    for i in range(form.Controls.Count):
+        ctrl = form.Controls(i)
+        try:
+            if ctrl.ControlType != _AC_SUBFORM:
+                continue
+            if ctrl.Name == SFDOC_SUBFORM_NAME:
+                ctrl.Form.Recordset.MoveLast()
+                log.info(f"MoveLast() on '{SFDOC_SUBFORM_NAME}'")
+                return
+            _goto_last_record(ctrl.Form)
+        except Exception as e:
+            log.debug(f"MoveLast failed on '{getattr(ctrl, 'Name', '?')}': {e}")
+
+
 def refresh_ui() -> None:
     if not WIN32_AVAILABLE:
         return
@@ -204,6 +225,7 @@ def refresh_ui() -> None:
             log.warning("Refresh skipped: no active form in Access.")
             return
         _requery_form(form)
+        _goto_last_record(form)
     except Exception as e:
         log.warning(f"COM refresh failed (non-blocking): {e}")
 
@@ -347,7 +369,7 @@ def main() -> None:
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Image Router v3.4 started")
+    log.info("Image Router v3.5 started")
     log.info(f"  Source     : {SOURCE_DIR}")
     log.info(f"  Dest       : {DEST_PHOTOS}")
     log.info(f"  PUBLIC.MDB : {PUBLIC_MDB}")
