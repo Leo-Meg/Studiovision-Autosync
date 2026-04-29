@@ -29,7 +29,7 @@ DEST_PHOTOS = Path(r"??")
 PUBLIC_MDB  = Path(r"??")
 DOCUM_MDB   = Path(r"??")
 
-WATCHED_EXTENSIONS     = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
+WATCHED_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
 FILE_LOCK_RETRY_DELAY  = 3
 FILE_LOCK_MAX_ATTEMPTS = 15
 PATIENT_POLL_INTERVAL  = 3
@@ -45,6 +45,7 @@ SFDOC_SUBFORM_NAME = "SFDoc"
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
+    ".jfif": "Image",
     ".png":  "Image",
     ".bmp":  "Image",
     ".tif":  "OCT",
