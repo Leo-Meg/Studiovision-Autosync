@@ -147,9 +147,9 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         log.warning("pyodbc not available, insert skipped.")
         return False
 
-    target_mdb = DOCUM_MDB if DOCUM_MDB.exists() else PUBLIC_MDB
+    target_mdb = PUBLIC_MDB
     if not target_mdb.exists():
-        log.error("No writable MDB found.")
+        log.error("PUBLIC.MDB not found, insert skipped.")
         return False
 
     try:
