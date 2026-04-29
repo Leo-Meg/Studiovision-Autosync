@@ -10,14 +10,12 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-# win32com is Windows-only; gracefully degrade on other platforms
 try:
     import win32com.client
     WIN32_AVAILABLE = True
 except ImportError:
     WIN32_AVAILABLE = False
 
-# pyodbc requires the Microsoft Access ODBC driver to be installed
 try:
     import pyodbc
     PYODBC_AVAILABLE = True
@@ -25,33 +23,28 @@ except ImportError:
     PYODBC_AVAILABLE = False
 
 
-# Paths — must be configured before running
-# Note: retype DOCUM_MDB manually, do not copy-paste (risk of invisible characters)
 SOURCE_DIR  = Path(r"??")
 ORPHAN_DIR  = Path(r"??")
 DEST_PHOTOS = Path(r"??")
 PUBLIC_MDB  = Path(r"??")
 DOCUM_MDB   = Path(r"??")
 
-WATCHED_EXTENSIONS     = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
-FILE_LOCK_RETRY_DELAY  = 3    # seconds between lock-check retries
-FILE_LOCK_MAX_ATTEMPTS = 15   # max retries before giving up on a locked file
-PATIENT_POLL_INTERVAL  = 3    # seconds between Access polls
-PATIENT_WAIT_TIMEOUT   = 900  # seconds before orphaning a file (15 min)
+WATCHED_EXTENSIONS     = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".dcm"}
+FILE_LOCK_RETRY_DELAY  = 3
+FILE_LOCK_MAX_ATTEMPTS = 15
+PATIENT_POLL_INTERVAL  = 3
+PATIENT_WAIT_TIMEOUT   = 900
 
-# Field names as they appear on the StudioVision patient form — do not translate
 ACCESS_FIELD_CODE   = "Code patient"
 ACCESS_FIELD_NOM    = "NOM"
 ACCESS_FIELD_PRENOM = "Prénom"
 
-# Name of the documents subform in Access — do not translate
+# Name of the subform that lists documents — update if the form is renamed
 SFDOC_SUBFORM_NAME = "SFDoc"
 
-# Description inserted into the DB per file extension
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
     ".jpeg": "Image",
-    ".jfif": "Image",
     ".png":  "Image",
     ".bmp":  "Image",
     ".tif":  "OCT",
@@ -72,18 +65,12 @@ log = logging.getLogger("image_router")
 
 
 def db_connect(mdb_path: Path):
-    """Return a pyodbc connection to an Access MDB/ACCDB file."""
     return pyodbc.connect(
         f"DRIVER={{Microsoft Access Driver (*.mdb, *.accdb)}};DBQ={mdb_path};"
     )
 
 
 def get_active_patient() -> dict | None:
-    """Read the patient currently open in StudioVision via COM automation.
-
-    Returns a dict with keys 'code', 'nom', 'prenom', or None if no patient
-    form is active or COM is unavailable.
-    """
     if not WIN32_AVAILABLE:
         return None
     try:
@@ -101,10 +88,10 @@ def get_active_patient() -> dict | None:
                 if str(ctrl.Name) in target:
                     data[ctrl.Name] = ctrl.Value
             except Exception:
-                pass  # labels and buttons have no .Value
+                pass
 
         if not target.issubset(data.keys()):
-            return None  # active form is not the patient form
+            return None
 
         return {
             "code":   str(data[ACCESS_FIELD_CODE]),
@@ -117,12 +104,6 @@ def get_active_patient() -> dict | None:
 
 
 def find_patient_folder(patient_code: str) -> Path | None:
-    """Resolve the patient's photo folder from PUBLIC.MDB.
-
-    Queries the most recent 'Photo externe' entry for the patient and extracts
-    the group and patient folder names from the stored relative path.
-    Returns the absolute Path if found and valid, otherwise None.
-    """
     if not PYODBC_AVAILABLE:
         log.error("pyodbc not available.")
         return None
@@ -144,10 +125,9 @@ def find_patient_folder(patient_code: str) -> Path | None:
             log.warning(f"No existing document found for patient {patient_code}.")
             return None
 
-        # Expected format: \<group_folder>\<patient_folder>\filename.ext
         parts = row[0].strip().strip("\\").split("\\")
         if len(parts) < 2:
-            log.error("Unexpected Photo externe format (value redacted).")
+            log.error(f"Unexpected Photo externe format: {row[0]}")
             return None
 
         folder = DEST_PHOTOS / parts[0] / parts[1]
@@ -163,20 +143,17 @@ def find_patient_folder(patient_code: str) -> Path | None:
 
 
 def insert_document(patient: dict, relative_path: str, description: str) -> bool:
-    """Insert a document row exclusively into DOCUM_MDB. No fallback to PUBLIC_MDB is attempted.
-
-    Returns False on any failure so the caller can orphan the image.
-    """
     if not PYODBC_AVAILABLE:
-        log.error("pyodbc not available — insert skipped.")
+        log.warning("pyodbc not available, insert skipped.")
         return False
 
-    if not DOCUM_MDB.exists():
-        log.error(f"DOCUM_MDB not found or unreachable: {DOCUM_MDB} — insert aborted.")
+    target_mdb = DOCUM_MDB if DOCUM_MDB.exists() else PUBLIC_MDB
+    if not target_mdb.exists():
+        log.error("No writable MDB found.")
         return False
 
     try:
-        conn   = db_connect(DOCUM_MDB)
+        conn   = db_connect(target_mdb)
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -188,12 +165,10 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         )
         conn.commit()
         conn.close()
-        log.info(f"Insert OK: patient={patient['code']} path='{relative_path}' db={DOCUM_MDB.name}")
+        log.info(f"Insert OK: patient={patient['code']} path='{relative_path}' db={target_mdb.name}")
         return True
-
     except Exception as e:
-        # Covers network drops, locked files, driver errors, etc.
-        log.error(f"Insert failed in {DOCUM_MDB.name}: {e} — no fallback attempted.")
+        log.error(f"DB insert failed: {e}")
         return False
 
 
@@ -201,50 +176,46 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
 _AC_SUBFORM = 112
 
 
-def _find_and_requery_sfdoc(form) -> bool:
-    """Recursively search for the SFDoc subform, requery it, and move to the last record.
+def _requery_form(form) -> None:
+    # Recurse into subforms first so their data is fresh before the parent requeried
+    for i in range(form.Controls.Count):
+        ctrl = form.Controls(i)
+        try:
+            if ctrl.ControlType == _AC_SUBFORM:
+                _requery_form(ctrl.Form)
+        except Exception:
+            pass
 
-    Returns True if the subform was found and processed.
-    """
+    try:
+        form.Requery()
+        log.info(f"Requery() on '{form.Name}'")
+    except Exception as e_req:
+        log.warning(f"Requery() unavailable on '{form.Name}' ({e_req}), trying Refresh()...")
+        try:
+            form.Refresh()
+            log.info(f"Refresh() on '{form.Name}'")
+        except Exception as e_ref:
+            log.warning(f"Refresh() also unavailable on '{form.Name}' ({e_ref})")
+
+
+def _goto_last_record(form) -> None:
+    # After requery the cursor resets to the first record; move it to the last so
+    # the newly inserted image is already selected when the user clicks Visualiser
     for i in range(form.Controls.Count):
         ctrl = form.Controls(i)
         try:
             if ctrl.ControlType != _AC_SUBFORM:
                 continue
-
             if ctrl.Name == SFDOC_SUBFORM_NAME:
-                # Requery only this subform, leaving other forms untouched
-                try:
-                    ctrl.Form.Requery()
-                    log.info(f"Requery() on '{SFDOC_SUBFORM_NAME}'")
-                except Exception as e_req:
-                    log.warning(f"Requery() unavailable on '{SFDOC_SUBFORM_NAME}' ({e_req}), trying Refresh()...")
-                    try:
-                        ctrl.Form.Refresh()
-                        log.info(f"Refresh() on '{SFDOC_SUBFORM_NAME}'")
-                    except Exception as e_ref:
-                        log.warning(f"Refresh() also unavailable on '{SFDOC_SUBFORM_NAME}' ({e_ref})")
-
-                # Move to the last record so the new image is already selected
-                try:
-                    ctrl.Form.Recordset.MoveLast()
-                    log.info(f"MoveLast() on '{SFDOC_SUBFORM_NAME}'")
-                except Exception as e:
-                    log.debug(f"MoveLast() failed on '{SFDOC_SUBFORM_NAME}': {e}")
-
-                return True
-
-            if _find_and_requery_sfdoc(ctrl.Form):
-                return True
-
-        except Exception:
-            pass
-
-    return False
+                ctrl.Form.Recordset.MoveLast()
+                log.info(f"MoveLast() on '{SFDOC_SUBFORM_NAME}'")
+                return
+            _goto_last_record(ctrl.Form)
+        except Exception as e:
+            log.debug(f"MoveLast failed on '{getattr(ctrl, 'Name', '?')}': {e}")
 
 
 def refresh_ui() -> None:
-    """Requery only the SFDoc subform to show the new record without touching other forms."""
     if not WIN32_AVAILABLE:
         return
     try:
@@ -253,19 +224,13 @@ def refresh_ui() -> None:
         if form is None:
             log.warning("Refresh skipped: no active form in Access.")
             return
-
-        if not _find_and_requery_sfdoc(form):
-            log.warning(f"Subform '{SFDOC_SUBFORM_NAME}' not found — refresh skipped.")
-
+        _requery_form(form)
+        _goto_last_record(form)
     except Exception as e:
         log.warning(f"COM refresh failed (non-blocking): {e}")
 
 
 def wait_for_file(file: Path) -> bool:
-    """Block until the file is no longer locked by the imaging device.
-
-    Returns True when the file can be opened, False after the maximum number of retries.
-    """
     for attempt in range(1, FILE_LOCK_MAX_ATTEMPTS + 1):
         try:
             with file.open("rb"):
@@ -278,10 +243,6 @@ def wait_for_file(file: Path) -> bool:
 
 
 def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
-    """Move source into dest_folder, appending a timestamp suffix on name conflict.
-
-    Returns the final destination Path, or None on failure.
-    """
     dest_folder.mkdir(parents=True, exist_ok=True)
     dest = dest_folder / source.name
 
@@ -301,24 +262,12 @@ def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
 
 
 def orphan_file(file: Path) -> None:
-    """Move an unmatched or failed file to the orphan folder."""
     log.warning(f"Orphaning: {file.name}")
     move_file(file, ORPHAN_DIR, label="ORPHAN")
 
 
 def worker(file_queue: queue.Queue) -> None:
-    """Background thread that processes image files one at a time.
-
-    For each file:
-      1. Wait for the device to finish writing (lock check).
-      2. Poll Access until a patient form is open or the timeout expires.
-      3. Resolve the patient folder from the database.
-      4. Move the image into that folder.
-      5. Insert a document record and refresh the Access UI.
-         If the insert fails, orphan the already-moved file to avoid a
-         ghost image with no database record.
-    """
-    # COM must be initialized per thread; it cannot be shared across threads
+    # COM must be initialized on the worker thread, not the main thread
     pythoncom.CoInitialize()
     log.info("Worker started.")
 
@@ -367,7 +316,7 @@ def worker(file_queue: queue.Queue) -> None:
             if patient is None:
                 continue
 
-            log.info(f"Patient matched (code {patient['code']})")
+            log.info(f"Patient: {patient['nom']} {patient['prenom']} (code {patient['code']})")
 
             patient_folder = find_patient_folder(patient["code"])
             if not patient_folder:
@@ -386,13 +335,11 @@ def worker(file_queue: queue.Queue) -> None:
             description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
 
             if insert_document(patient, relative_path, description):
-                # Give Access time to see the committed record before requerying
+                # Give Access enough time to see the committed record before requerying
                 time.sleep(1.5)
                 refresh_ui()
             else:
-                # Orphan the already-moved file to avoid a ghost image with no DB record
-                log.error("Insert failed — orphaning the moved file to avoid a record-less image.")
-                orphan_file(dest)
+                log.warning("Insert failed, refresh skipped.")
 
             file_queue.task_done()
 
@@ -401,8 +348,6 @@ def worker(file_queue: queue.Queue) -> None:
 
 
 class ImageProducer(FileSystemEventHandler):
-    """Watchdog event handler — enqueues new image files for the worker thread."""
-
     def __init__(self, file_queue: queue.Queue) -> None:
         super().__init__()
         self._queue = file_queue
@@ -424,7 +369,7 @@ def main() -> None:
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Image Router v3.6 started")
+    log.info("Image Router v3.5 started")
     log.info(f"  Source     : {SOURCE_DIR}")
     log.info(f"  Dest       : {DEST_PHOTOS}")
     log.info(f"  PUBLIC.MDB : {PUBLIC_MDB}")
@@ -435,7 +380,6 @@ def main() -> None:
 
     file_queue: queue.Queue = queue.Queue()
 
-    # Single daemon worker processes files sequentially to avoid race conditions
     worker_thread = threading.Thread(target=worker, args=(file_queue,), name="Worker", daemon=True)
     worker_thread.start()
 
@@ -454,7 +398,6 @@ def main() -> None:
         observer.stop()
         observer.join()
 
-        # Drain the queue before exiting so no image is lost
         remaining = file_queue.qsize()
         if remaining:
             log.info(f"Waiting for {remaining} remaining file(s)...")
