@@ -44,7 +44,7 @@ ACCESS_FIELD_PRENOM = "Prénom"
 # Name of the subform that lists documents
 SFDOC_SUBFORM_NAME = "SFDoc"
 
-# Description to use in the database for each file type; 
+# Description to use in the database for each file type;
 # default is "Image" except for TIFF which is "OCT" and DICOM which is "DICOM"
 EXAM_DESCRIPTION = {
     ".jpg":  "Image",
@@ -109,7 +109,7 @@ def get_active_patient() -> dict | None:
         log.debug(f"COM error: {e}")
         return None
 
-# Uses the PUBLIC.MDB Documents table to resolve the patient's photo folder, 
+# Uses the PUBLIC.MDB Documents table to resolve the patient's photo folder,
 # returning a Path if successful or None if any step fails
 def find_patient_folder(patient_code: str) -> Path | None:
     if not PYODBC_AVAILABLE:
@@ -155,7 +155,7 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
         log.warning("pyodbc not available, insert skipped.")
         return False
 
-    # IMPORTANT target_mdb must be PUBLIC.MDB because DOCUM.MDB is read-only for this operation
+    # IMPORTANT: target_mdb must be PUBLIC.MDB because DOCUM.MDB is read-only for this operation
     target_mdb = PUBLIC_MDB
     if not target_mdb.exists():
         log.error("PUBLIC.MDB not found, insert skipped.")
@@ -187,7 +187,7 @@ _AC_SUBFORM = 112
 # Requery the form to show the new document, with a fallback to Refresh() if Requery() is unavailable
 def _requery_form(form) -> None:
     
-    # Recurse into subforms first so their data is fresh before the parent requeried
+    # Recurse into subforms first so their data is fresh before the parent is requeried
     for i in range(form.Controls.Count):
         ctrl = form.Controls(i)
         try:
@@ -222,7 +222,7 @@ def _goto_last_record(form) -> None:
         except Exception as e:
             log.debug(f"MoveLast failed on '{getattr(ctrl, 'Name', '?')}': {e}")
 
-# Refreshes the active Access form to show the newly added document, 
+# Refreshes the active Access form to show the newly added document,
 # with error handling to avoid blocking the worker thread if Access is not responsive
 def refresh_ui() -> None:
     if not WIN32_AVAILABLE:
@@ -274,22 +274,24 @@ def orphan_file(file: Path) -> None:
     log.warning(f"Orphaning: {file.name}")
     move_file(file, ORPHAN_DIR, label="ORPHAN")
 
-# Supprime un dossier seulement s'il est strictement vide ; échoue silencieusement sinon
+# Removes a folder only if it is strictly empty; fails silently otherwise
 def _try_rmdir(folder: Path) -> None:
     try:
         if folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
-            log.info(f"Dossier vide supprimé : {folder}")
+            log.info(f"Empty folder removed: {folder}")
         else:
-            log.debug(f"Dossier non supprimé (non-vide ou absent) : {folder}")
+            log.debug(f"Folder not removed (non-empty or missing): {folder}")
     except Exception as e:
-        log.debug(f"_try_rmdir({folder}) ignorée : {e}")
+        log.debug(f"_try_rmdir({folder}) ignored: {e}")
 
-# Worker thread function that processes files from the queue, with patient lookup, file moving, 
+# Worker thread function that processes files from the queue, with patient lookup, file moving,
 # DB insertion, and UI refresh logic
 def worker(file_queue: queue.Queue) -> None:
     pythoncom.CoInitialize()
     log.info("Worker started.")
+
+    processed_scan_dirs: set[Path] = set()
 
     try:
         while True:
@@ -311,23 +313,31 @@ def worker(file_queue: queue.Queue) -> None:
                 file_queue.task_done()
                 continue
 
-            scan_dir = file.parent         
-            main_dir = file.parent.parent  # ex. …/Dossier_Principal
+            scan_dir = file.parent
+            main_dir = file.parent.parent
             is_nidek = main_dir == SOURCE_DIR
 
             if is_nidek:
+                if scan_dir in processed_scan_dirs:
+                    try:
+                        file.unlink()
+                        log.info(f"[NIDEK] Residual file removed (scan already processed): {file.name}")
+                    except Exception as e:
+                        log.warning(f"[NIDEK] Could not remove residual file "
+                                    f"{file.name}: {e}")
+                    file_queue.task_done()
+                    continue
 
-                log.info(f"[NIDEK] Stabilisation dans '{scan_dir.name}' "
-                         f"(parent : '{main_dir.name}')…")
+                log.info(f"[NIDEK] Waiting for scan folder '{scan_dir.name}' "
+                         f"to stabilise (parent: '{main_dir.name}')...")
                 time.sleep(2)
 
                 for xml_file in list(scan_dir.glob("*.xml")):
                     try:
                         xml_file.unlink()
-                        log.info(f"[NIDEK] XML supprimé : {xml_file.name}")
+                        log.info(f"[NIDEK] XML removed: {xml_file.name}")
                     except Exception as e:
-                        log.warning(f"[NIDEK] Impossible de supprimer {xml_file.name} : {e}")
-
+                        log.warning(f"[NIDEK] Could not remove {xml_file.name}: {e}")
 
                 sibling_images = [
                     f for f in scan_dir.iterdir()
@@ -335,25 +345,26 @@ def worker(file_queue: queue.Queue) -> None:
                 ]
 
                 if not sibling_images:
-                    log.warning(f"[NIDEK] Aucune image trouvée dans '{scan_dir.name}', ignoré.")
+                    log.warning(f"[NIDEK] No images found in '{scan_dir.name}', skipping.")
                     file_queue.task_done()
                     continue
 
                 largest_image = max(sibling_images, key=lambda f: f.stat().st_size)
 
                 if file.resolve() != largest_image.resolve():
-
                     try:
                         file.unlink()
-                        log.info(f"[NIDEK] Miniature supprimée : {file.name}")
+                        log.info(f"[NIDEK] Thumbnail removed: {file.name}")
                     except Exception as e:
-                        log.warning(f"[NIDEK] Impossible de supprimer la miniature "
-                                    f"{file.name} : {e}")
+                        log.warning(f"[NIDEK] Could not remove thumbnail "
+                                    f"{file.name}: {e}")
                     file_queue.task_done()
                     continue
 
-                log.info(f"[NIDEK] Image principale identifiée : {file.name} "
-                         f"({file.stat().st_size:,} octets)")
+                log.info(f"[NIDEK] Main image identified: {file.name} "
+                         f"({file.stat().st_size:,} bytes)")
+
+                processed_scan_dirs.add(scan_dir)
 
             patient    = None
             start_time = time.monotonic()
@@ -372,7 +383,8 @@ def worker(file_queue: queue.Queue) -> None:
                     break
 
                 if first_log:
-                    log.info(f"No patient open, waiting (timeout in {PATIENT_WAIT_TIMEOUT // 60} min)")
+                    log.info(f"No patient open, waiting "
+                             f"(timeout in {PATIENT_WAIT_TIMEOUT // 60} min)")
                     first_log = False
 
                 time.sleep(PATIENT_POLL_INTERVAL)
@@ -397,6 +409,7 @@ def worker(file_queue: queue.Queue) -> None:
             if is_nidek:
                 _try_rmdir(scan_dir)
                 _try_rmdir(main_dir)
+                processed_scan_dirs.discard(scan_dir)
 
             group_name    = patient_folder.parent.name
             relative_path = f"\\{group_name}\\{patient_folder.name}\\{dest.name}"
