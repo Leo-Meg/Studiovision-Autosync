@@ -371,7 +371,7 @@ class ImageProducer(FileSystemEventHandler):
         log.info(f"Enqueued: {file.name} (queue size: {self._queue.qsize() + 1})")
         self._queue.put(file)
 
-
+# Main function to start the image router
 def main() -> None:
     if not SOURCE_DIR.exists():
         log.critical(f"Source folder not found: {SOURCE_DIR}")
