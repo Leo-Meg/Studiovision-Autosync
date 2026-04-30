@@ -291,6 +291,7 @@ def worker(file_queue: queue.Queue) -> None:
     pythoncom.CoInitialize()
     log.info("Worker started.")
 
+    # Tracks scan folders already processed to suppress residual files still in the queue
     processed_scan_dirs: set[Path] = set()
 
     try:
@@ -315,21 +316,26 @@ def worker(file_queue: queue.Queue) -> None:
 
             scan_dir = file.parent
             main_dir = file.parent.parent
-            is_nidek = main_dir == SOURCE_DIR
+            is_nidek = main_dir.parent == SOURCE_DIR  
 
             if is_nidek:
+
                 if scan_dir in processed_scan_dirs:
                     try:
                         file.unlink()
-                        log.info(f"[NIDEK] Residual file removed (scan already processed): {file.name}")
+                        log.info(f"[NIDEK] Residual removed (scan already processed): {file.name}")
                     except Exception as e:
-                        log.warning(f"[NIDEK] Could not remove residual file "
-                                    f"{file.name}: {e}")
+                        log.warning(f"[NIDEK] Could not remove residual {file.name}: {e}")
+
+                    _try_rmdir(scan_dir)
+                    _try_rmdir(main_dir)
+                    if not scan_dir.exists():
+                        processed_scan_dirs.discard(scan_dir)
+
                     file_queue.task_done()
                     continue
 
-                log.info(f"[NIDEK] Waiting for scan folder '{scan_dir.name}' "
-                         f"to stabilise (parent: '{main_dir.name}')...")
+                log.info(f"[NIDEK] Stabilising '{scan_dir.name}' (parent: '{main_dir.name}')...")
                 time.sleep(2)
 
                 for xml_file in list(scan_dir.glob("*.xml")):
@@ -338,6 +344,7 @@ def worker(file_queue: queue.Queue) -> None:
                         log.info(f"[NIDEK] XML removed: {xml_file.name}")
                     except Exception as e:
                         log.warning(f"[NIDEK] Could not remove {xml_file.name}: {e}")
+
 
                 sibling_images = [
                     f for f in scan_dir.iterdir()
@@ -352,17 +359,18 @@ def worker(file_queue: queue.Queue) -> None:
                 largest_image = max(sibling_images, key=lambda f: f.stat().st_size)
 
                 if file.resolve() != largest_image.resolve():
+
                     try:
                         file.unlink()
                         log.info(f"[NIDEK] Thumbnail removed: {file.name}")
                     except Exception as e:
-                        log.warning(f"[NIDEK] Could not remove thumbnail "
-                                    f"{file.name}: {e}")
+                        log.warning(f"[NIDEK] Could not remove thumbnail {file.name}: {e}")
                     file_queue.task_done()
                     continue
 
                 log.info(f"[NIDEK] Main image identified: {file.name} "
                          f"({file.stat().st_size:,} bytes)")
+
 
                 processed_scan_dirs.add(scan_dir)
 
@@ -405,11 +413,13 @@ def worker(file_queue: queue.Queue) -> None:
             if dest is None:
                 file_queue.task_done()
                 continue
-
+            
             if is_nidek:
                 _try_rmdir(scan_dir)
                 _try_rmdir(main_dir)
-                processed_scan_dirs.discard(scan_dir)
+                if not scan_dir.exists():
+                    processed_scan_dirs.discard(scan_dir)
+                    log.info(f"[NIDEK] scan_dir cleared from tracking set.")
 
             group_name    = patient_folder.parent.name
             relative_path = f"\\{group_name}\\{patient_folder.name}\\{dest.name}"
