@@ -7,6 +7,7 @@ import time
 import logging
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
@@ -76,7 +77,7 @@ def db_connect(mdb_path: Path):
     )
 
 # Returns a dict with patient info if an Access form with the expected fields is active, else None
-def get_active_patient() -> dict | None:
+def get_active_patient() -> Optional[dict]:
     if not WIN32_AVAILABLE:
         return None
     try:
@@ -111,7 +112,7 @@ def get_active_patient() -> dict | None:
 
 # Uses the PUBLIC.MDB Documents table to resolve the patient's photo folder, 
 # returning a Path if successful or None if any step fails
-def find_patient_folder(patient_code: str) -> Path | None:
+def find_patient_folder(patient_code: str) -> Optional[Path]:
     if not PYODBC_AVAILABLE:
         log.error("pyodbc not available.")
         return None
@@ -252,7 +253,7 @@ def wait_for_file(file: Path) -> bool:
     return False
 
 # Moves the file to the destination folder, handling name conflicts by appending a timestamp
-def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
+def move_file(source: Path, dest_folder: Path, label: str = "") -> Optional[Path]:
     dest_folder.mkdir(parents=True, exist_ok=True)
     dest = dest_folder / source.name
 
