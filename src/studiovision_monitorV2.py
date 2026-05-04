@@ -58,12 +58,16 @@ EXAM_DESCRIPTION = {
 }
 
 # Configure logging to file and console with timestamps and thread names
+import os
+_log_path = os.path.join(os.path.expanduser("~"), "studiovision", "image_router.log")
+os.makedirs(os.path.dirname(_log_path), exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  [%(threadName)s]  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler("image_router.log", encoding="utf-8"),
+        logging.FileHandler(_log_path, encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
