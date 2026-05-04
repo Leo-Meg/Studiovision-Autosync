@@ -184,46 +184,32 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
 # Access constant for subform control type
 _AC_SUBFORM = 112
 
-# Requery the form to show the new document, with a fallback to Refresh() if Requery() is unavailable
-def _requery_form(form) -> None:
-    
-    # Recurse into subforms first so their data is fresh before the parent is requeried
-    for i in range(form.Controls.Count):
-        ctrl = form.Controls(i)
-        try:
-            if ctrl.ControlType == _AC_SUBFORM:
-                _requery_form(ctrl.Form)
-        except Exception:
-            pass
 
-    try:
-        form.Requery()
-        log.info(f"Requery() on '{form.Name}'")
-    except Exception as e_req:
-        log.warning(f"Requery() unavailable on '{form.Name}' ({e_req}), trying Refresh()...")
-        try:
-            form.Refresh()
-            log.info(f"Refresh() on '{form.Name}'")
-        except Exception as e_ref:
-            log.warning(f"Refresh() also unavailable on '{form.Name}' ({e_ref})")
-
-# After requerying, move to the last record in the document subform to show the newly added document
-def _goto_last_record(form) -> None:
+def _find_sfdoc(form):
+    """
+    Recursively walks the form's control tree and returns the Form object
+    of the subform named SFDOC_SUBFORM_NAME, or None if not found.
+    This avoids touching the parent form's Recordset (and its current-record
+    pointer), which prevents the "sent back to record #1" regression.
+    """
     for i in range(form.Controls.Count):
         ctrl = form.Controls(i)
         try:
             if ctrl.ControlType != _AC_SUBFORM:
                 continue
             if ctrl.Name == SFDOC_SUBFORM_NAME:
-                ctrl.Form.Recordset.MoveLast()
-                log.info(f"MoveLast() on '{SFDOC_SUBFORM_NAME}'")
-                return
-            _goto_last_record(ctrl.Form)
-        except Exception as e:
-            log.debug(f"MoveLast failed on '{getattr(ctrl, 'Name', '?')}': {e}")
+                return ctrl.Form
+            # Descend into nested subforms
+            found = _find_sfdoc(ctrl.Form)
+            if found is not None:
+                return found
+        except Exception:
+            pass
+    return None
 
-# Refreshes the active Access form to show the newly added document,
-# with error handling to avoid blocking the worker thread if Access is not responsive
+
+# Refreshes only the SFDoc subform and moves to the last record.
+# Never touches the parent form. All COM errors are caught and logged.
 def refresh_ui() -> None:
     if not WIN32_AVAILABLE:
         return
@@ -233,10 +219,42 @@ def refresh_ui() -> None:
         if form is None:
             log.warning("Refresh skipped: no active form in Access.")
             return
-        _requery_form(form)
-        _goto_last_record(form)
+
+        sfdoc = _find_sfdoc(form)
+        if sfdoc is None:
+            log.warning(
+                f"Subform '{SFDOC_SUBFORM_NAME}' not found in the active form. "
+                "Refresh skipped."
+            )
+            return
+
+        # --- Requery the subform only ---
+        try:
+            sfdoc.Requery()
+            log.info(f"Requery() on '{SFDOC_SUBFORM_NAME}'")
+        except Exception as e_req:
+            log.warning(
+                f"Requery() unavailable on '{SFDOC_SUBFORM_NAME}' ({e_req}), "
+                "trying Refresh()..."
+            )
+            try:
+                sfdoc.Refresh()
+                log.info(f"Refresh() on '{SFDOC_SUBFORM_NAME}'")
+            except Exception as e_ref:
+                log.warning(
+                    f"Refresh() also unavailable on '{SFDOC_SUBFORM_NAME}' ({e_ref})"
+                )
+
+        # --- Navigate to the last record so the new document is visible ---
+        try:
+            sfdoc.Recordset.MoveLast()
+            log.info(f"MoveLast() on '{SFDOC_SUBFORM_NAME}'")
+        except Exception as e_ml:
+            log.debug(f"MoveLast() failed on '{SFDOC_SUBFORM_NAME}': {e_ml}")
+
     except Exception as e:
         log.warning(f"COM refresh failed (non-blocking): {e}")
+
 
 # Tries to open the file for reading to check if it's still locked by the writing process
 def wait_for_file(file: Path) -> bool:
@@ -249,6 +267,7 @@ def wait_for_file(file: Path) -> bool:
             time.sleep(FILE_LOCK_RETRY_DELAY)
     log.error(f"File still locked after {FILE_LOCK_MAX_ATTEMPTS} attempts: {file}")
     return False
+
 
 # Moves the file to the destination folder, handling name conflicts by appending a timestamp
 def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
@@ -269,10 +288,12 @@ def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
         log.error(f"Move failed: {e}")
         return None
 
+
 # Moves the file to the orphan folder with a warning log
 def orphan_file(file: Path) -> None:
     log.warning(f"Orphaning: {file.name}")
     move_file(file, ORPHAN_DIR, label="ORPHAN")
+
 
 # Removes a folder only if it is strictly empty; fails silently otherwise
 def _try_rmdir(folder: Path) -> None:
@@ -284,6 +305,7 @@ def _try_rmdir(folder: Path) -> None:
             log.debug(f"Folder not removed (non-empty or missing): {folder}")
     except Exception as e:
         log.debug(f"_try_rmdir({folder}) ignored: {e}")
+
 
 # Worker thread function that processes files from the queue, with patient lookup, file moving,
 # DB insertion, and UI refresh logic
@@ -353,7 +375,6 @@ def worker(file_queue: queue.Queue) -> None:
                     except Exception as e:
                         log.warning(f"[NIDEK] Could not remove {xml_file.name}: {e}")
 
-
                 sibling_images = [
                     f for f in scan_dir.iterdir()
                     if f.is_file() and f.suffix.lower() in WATCHED_EXTENSIONS
@@ -367,7 +388,6 @@ def worker(file_queue: queue.Queue) -> None:
                 largest_image = max(sibling_images, key=lambda f: f.stat().st_size)
 
                 if file.resolve() != largest_image.resolve():
-
                     try:
                         file.unlink()
                         log.info(f"[NIDEK] Thumbnail removed: {file.name}")
@@ -378,7 +398,6 @@ def worker(file_queue: queue.Queue) -> None:
 
                 log.info(f"[NIDEK] Main image identified: {file.name} "
                          f"({file.stat().st_size:,} bytes)")
-
 
                 processed_scan_dirs.add(scan_dir)
 
@@ -449,6 +468,7 @@ def worker(file_queue: queue.Queue) -> None:
             refresh_ui()
         pythoncom.CoUninitialize()
 
+
 # Watchdog event handler that enqueues new image files for processing by the worker thread
 class ImageProducer(FileSystemEventHandler):
     def __init__(self, file_queue: queue.Queue) -> None:
@@ -464,6 +484,7 @@ class ImageProducer(FileSystemEventHandler):
         log.info(f"Enqueued: {file.name} (queue size: {self._queue.qsize() + 1})")
         self._queue.put(file)
 
+
 # Main function to start the image router
 def main() -> None:
     if not SOURCE_DIR.exists():
@@ -472,7 +493,7 @@ def main() -> None:
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Image Router v3.6 started")
+    log.info("Version 2 started")
     log.info(f"  Source     : {SOURCE_DIR}")
     log.info(f"  Dest       : {DEST_PHOTOS}")
     log.info(f"  PUBLIC.MDB : {PUBLIC_MDB}")
@@ -507,6 +528,7 @@ def main() -> None:
             file_queue.join()
 
         log.info("Image Router stopped.")
+
 
 if __name__ == "__main__":
     main()
