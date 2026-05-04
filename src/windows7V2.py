@@ -440,7 +440,7 @@ def main():
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Image Router v3.6-win7 started")
+    log.info("Version 2 started")
     log.info("  Source     : %s", SOURCE_DIR)
     log.info("  Dest       : %s", DEST_PHOTOS)
     log.info("  PUBLIC.MDB : %s", PUBLIC_MDB)
