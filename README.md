@@ -14,6 +14,7 @@ Three variants are provided in `src/`. They share the same core logic and config
 | `studiovision_monitor.py` | v3.5 | Base version. Watches a flat source folder for new images. |
 | `windows7.py` | v3.5 | Same as above, using `typing.Optional` for Python 3.9 / Windows 7 compatibility. |
 | `box2.py` | v3.6 | Extended version with **Nidek device support** (see below). |
+| `studiovision_monitorV2.py` | v3.6 | Improved base version with **batched UI refresh** and **SFDoc-only requery** (see below). |
 
 ---
 
@@ -110,6 +111,8 @@ To add or remove extensions, edit `WATCHED_EXTENSIONS` and update `EXAM_DESCRIPT
 ```bash
 python src/box2.py
 # or
+python src/studiovision_monitorV2.py
+# or
 python src/studiovision_monitor.py
 ```
 
@@ -146,3 +149,19 @@ All orphan events are logged as warnings and must be handled manually.
 - `pythoncom.CoInitialize()` / `CoUninitialize()` are called on the worker thread — COM objects cannot be shared across threads.
 - `DOCUM.MDB` is read-only for inserts; all writes go to `PUBLIC.MDB`.
 - The `windows7.py` variant is functionally identical to `studiovision_monitor.py` but avoids `X | None` union syntax for compatibility with Python 3.9.
+
+---
+
+## studiovision_monitorV2.py — what changed vs v3.5
+
+### Batched UI refresh (burst debounce)
+
+In v3.5, `refresh_ui()` was called immediately after every successful DB insert, which caused Access to freeze when a device sent several images in rapid succession.
+
+`studiovision_monitorV2.py` replaces the blocking `file_queue.get()` with a `get(timeout=1.5)`. After each successful insert a `needs_refresh` flag is raised instead of calling `refresh_ui()` immediately. When the queue stays empty for 1.5 s (i.e. the burst is over), the refresh fires exactly once and the flag resets. This collapses N consecutive refreshes into a single one.
+
+### SFDoc-only requery
+
+In v3.5, `refresh_ui()` called `Requery()` / `Refresh()` on the entire active form, which reset the parent form's current-record pointer and sent the doctor back to record #1.
+
+`studiovision_monitorV2.py` introduces `_find_sfdoc()`, which recursively walks the control tree to locate the `SFDoc` subform and requeried **only that subform**. The parent form's recordset is never touched.
