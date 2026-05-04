@@ -58,16 +58,12 @@ EXAM_DESCRIPTION = {
 }
 
 # Configure logging to file and console with timestamps and thread names
-import os
-_log_path = os.path.join(os.path.expanduser("~"), "studiovision", "image_router.log")
-os.makedirs(os.path.dirname(_log_path), exist_ok=True)
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  [%(threadName)s]  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
-        logging.FileHandler(_log_path, encoding="utf-8"),
+        logging.FileHandler("image_router.log", encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ],
 )
@@ -188,30 +184,47 @@ def insert_document(patient: dict, relative_path: str, description: str) -> bool
 # Access constant for subform control type
 _AC_SUBFORM = 112
 
+# Requery the form to show the new document, with a fallback to Refresh() if Requery() is unavailable
+def _requery_form(form) -> None:
+    
+    # Recurse into subforms first so their data is fresh before the parent is requeried
+    for i in range(form.Controls.Count):
+        ctrl = form.Controls(i)
+        try:
+            if ctrl.ControlType == _AC_SUBFORM:
+                _requery_form(ctrl.Form)
+        except Exception:
+            pass
 
-def _find_sfdoc(form):
-    """Recursively walks the form's control tree and returns the Form object
-    of the subform named SFDOC_SUBFORM_NAME, or None if not found.
-    Avoids touching the parent form's Recordset, preventing the 'back to record #1' regression."""
+    try:
+        form.Requery()
+        log.info(f"Requery() on '{form.Name}'")
+    except Exception as e_req:
+        log.warning(f"Requery() unavailable on '{form.Name}' ({e_req}), trying Refresh()...")
+        try:
+            form.Refresh()
+            log.info(f"Refresh() on '{form.Name}'")
+        except Exception as e_ref:
+            log.warning(f"Refresh() also unavailable on '{form.Name}' ({e_ref})")
+
+# After requerying, move to the last record in the document subform to show the newly added document
+def _goto_last_record(form) -> None:
     for i in range(form.Controls.Count):
         ctrl = form.Controls(i)
         try:
             if ctrl.ControlType != _AC_SUBFORM:
                 continue
             if ctrl.Name == SFDOC_SUBFORM_NAME:
-                return ctrl.Form
-            found = _find_sfdoc(ctrl.Form)
-            if found is not None:
-                return found
-        except Exception:
-            pass
-    return None
+                ctrl.Form.Recordset.MoveLast()
+                log.info(f"MoveLast() on '{SFDOC_SUBFORM_NAME}'")
+                return
+            _goto_last_record(ctrl.Form)
+        except Exception as e:
+            log.debug(f"MoveLast failed on '{getattr(ctrl, 'Name', '?')}': {e}")
 
-
+# Refreshes the active Access form to show the newly added document,
+# with error handling to avoid blocking the worker thread if Access is not responsive
 def refresh_ui() -> None:
-    """Requeues only the SFDoc subform then moves to the last record.
-    Never touches the parent form — no 'back to record #1' side effect.
-    All COM errors are caught and logged."""
     if not WIN32_AVAILABLE:
         return
     try:
@@ -220,39 +233,8 @@ def refresh_ui() -> None:
         if form is None:
             log.warning("Refresh skipped: no active form in Access.")
             return
-
-        sfdoc = _find_sfdoc(form)
-        if sfdoc is None:
-            log.warning(
-                f"Subform '{SFDOC_SUBFORM_NAME}' not found in the active form. "
-                "Refresh skipped."
-            )
-            return
-
-        # --- Requery the subform only ---
-        try:
-            sfdoc.Requery()
-            log.info(f"Requery() on '{SFDOC_SUBFORM_NAME}'")
-        except Exception as e_req:
-            log.warning(
-                f"Requery() unavailable on '{SFDOC_SUBFORM_NAME}' ({e_req}), "
-                "trying Refresh()..."
-            )
-            try:
-                sfdoc.Refresh()
-                log.info(f"Refresh() on '{SFDOC_SUBFORM_NAME}'")
-            except Exception as e_ref:
-                log.warning(
-                    f"Refresh() also unavailable on '{SFDOC_SUBFORM_NAME}' ({e_ref})"
-                )
-
-        # --- Navigate to the last record so the new document is visible ---
-        try:
-            sfdoc.Recordset.MoveLast()
-            log.info(f"MoveLast() on '{SFDOC_SUBFORM_NAME}'")
-        except Exception as e_ml:
-            log.debug(f"MoveLast() failed on '{SFDOC_SUBFORM_NAME}': {e_ml}")
-
+        _requery_form(form)
+        _goto_last_record(form)
     except Exception as e:
         log.warning(f"COM refresh failed (non-blocking): {e}")
 
@@ -319,8 +301,6 @@ def worker(file_queue: queue.Queue) -> None:
             try:
                 file: Path = file_queue.get(timeout=1.5)
             except queue.Empty:
-                # Queue drained — if at least one insert succeeded since the last refresh,
-                # now is the right moment to update the UI (burst debounce).
                 if needs_refresh:
                     log.info("Burst complete — triggering batched UI refresh.")
                     refresh_ui()
@@ -441,7 +421,19 @@ def worker(file_queue: queue.Queue) -> None:
             if dest is None:
                 file_queue.task_done()
                 continue
-            
+
+            group_name    = patient_folder.parent.name
+            relative_path = f"\\{group_name}\\{patient_folder.name}\\{dest.name}"
+            description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
+
+            if insert_document(patient, relative_path, description):
+                # Raise the flag — refresh fires at burst end, not immediately
+                needs_refresh = True
+                log.debug("Insert OK — needs_refresh=True (refresh deferred to burst end).")
+            else:
+                log.warning("Insert failed, refresh flag unchanged.")
+
+            # Clean up scan folders last, after file transfer and DB insert
             if is_nidek:
                 _try_rmdir(scan_dir)
                 _try_rmdir(main_dir)
@@ -449,22 +441,9 @@ def worker(file_queue: queue.Queue) -> None:
                     processed_scan_dirs.discard(scan_dir)
                     log.info(f"[NIDEK] scan_dir cleared from tracking set.")
 
-            group_name    = patient_folder.parent.name
-            relative_path = f"\\{group_name}\\{patient_folder.name}\\{dest.name}"
-            description   = EXAM_DESCRIPTION.get(file.suffix.lower(), "Image")
-
-            if insert_document(patient, relative_path, description):
-                # Raise the flag — the refresh will fire once the burst ends,
-                # not immediately (avoids freezing Access on rapid sequences).
-                needs_refresh = True
-                log.debug("Insert OK — needs_refresh=True (refresh deferred to burst end).")
-            else:
-                log.warning("Insert failed, refresh flag unchanged.")
-
             file_queue.task_done()
 
     finally:
-        # Flush any pending refresh before the thread exits
         if needs_refresh:
             log.info("Worker shutting down — flushing pending UI refresh.")
             refresh_ui()
