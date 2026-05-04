@@ -1,0 +1,14 @@
+cd C:\chemin\vers\ton\script
+pyinstaller --onefile --noconsole --name studiovision_monitor studiovision_monitor.py
+
+$exe = "C:\chemin\vers\ton\script\dist\studiovision_monitor.exe"
+
+$startup = [System.Environment]::GetFolderPath("Startup")
+
+$shell = New-Object -ComObject WScript.Shell
+
+$shortcut = $shell.CreateShortcut("$startup\studiovision_monitor.lnk")
+
+$shortcut.TargetPath = $exe
+
+$shortcut.Save()
