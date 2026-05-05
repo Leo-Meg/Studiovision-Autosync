@@ -231,30 +231,25 @@ def refresh_ui():
             )
             return
 
-        # sfdoc.Requery() can trigger a re-render of the parent form on older
-        # Access versions, sending the doctor back to record #1.
-        # sfdoc.Recordset.Requery() refreshes only the data layer; the
-        # subsequent sfdoc.Refresh() repaints the subform without touching
-        # the parent's current-record pointer.
+        # Requery the subform only
         try:
-            sfdoc.Recordset.Requery()
-            log.info("Recordset.Requery() on '%s'", SFDOC_SUBFORM_NAME)
-        except Exception as e_rq:
+            sfdoc.Requery()
+            log.info("Requery() on '%s'", SFDOC_SUBFORM_NAME)
+        except Exception as e_req:
             log.warning(
-                "Recordset.Requery() failed on '%s' (%s), skipping.",
-                SFDOC_SUBFORM_NAME, e_rq
+                "Requery() unavailable on '%s' (%s), trying Refresh()...",
+                SFDOC_SUBFORM_NAME, e_req
             )
+            try:
+                sfdoc.Refresh()
+                log.info("Refresh() on '%s'", SFDOC_SUBFORM_NAME)
+            except Exception as e_ref:
+                log.warning(
+                    "Refresh() also unavailable on '%s' (%s)",
+                    SFDOC_SUBFORM_NAME, e_ref
+                )
 
-        try:
-            sfdoc.Refresh()
-            log.info("Refresh() on '%s'", SFDOC_SUBFORM_NAME)
-        except Exception as e_ref:
-            log.warning(
-                "Refresh() failed on '%s' (%s)",
-                SFDOC_SUBFORM_NAME, e_ref
-            )
-
-        # --- Navigate to the last record so the new document is visible ---
+        # Navigate to the last record so the new document is visible
         try:
             sfdoc.Recordset.MoveLast()
             log.info("MoveLast() on '%s'", SFDOC_SUBFORM_NAME)
