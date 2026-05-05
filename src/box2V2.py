@@ -268,7 +268,6 @@ def wait_for_file(file: Path) -> bool:
     log.error(f"File still locked after {FILE_LOCK_MAX_ATTEMPTS} attempts: {file}")
     return False
 
-
 # Moves the file to the destination folder, handling name conflicts by appending a timestamp
 def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
     dest_folder.mkdir(parents=True, exist_ok=True)
@@ -288,12 +287,10 @@ def move_file(source: Path, dest_folder: Path, label: str = "") -> Path | None:
         log.error(f"Move failed: {e}")
         return None
 
-
 # Moves the file to the orphan folder with a warning log
 def orphan_file(file: Path) -> None:
     log.warning(f"Orphaning: {file.name}")
     move_file(file, ORPHAN_DIR, label="ORPHAN")
-
 
 # Removes a folder only if it is strictly empty; fails silently otherwise
 def _try_rmdir(folder: Path) -> None:
@@ -484,7 +481,6 @@ class ImageProducer(FileSystemEventHandler):
         log.info(f"Enqueued: {file.name} (queue size: {self._queue.qsize() + 1})")
         self._queue.put(file)
 
-
 # Main function to start the image router
 def main() -> None:
     if not SOURCE_DIR.exists():
@@ -493,7 +489,7 @@ def main() -> None:
 
     ORPHAN_DIR.mkdir(parents=True, exist_ok=True)
 
-    log.info("Version 2 started")
+    log.info("Image Router v3.7 started")
     log.info(f"  Source     : {SOURCE_DIR}")
     log.info(f"  Dest       : {DEST_PHOTOS}")
     log.info(f"  PUBLIC.MDB : {PUBLIC_MDB}")
