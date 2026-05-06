@@ -13,3 +13,23 @@ $shortcut.TargetPath = $exe
 $shortcut.WorkingDirectory = "C:\Users\Optovue User\Desktop\Vic\dist"
 
 $shortcut.Save()
+
+# cmd
+
+taskkill /f /im windows7.exe /t
+
+schtasks /delete /tn "windows7" /f
+
+del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\windows7.lnk"
+del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\studiovision_monitor.lnk"
+
+rmdir /s /q "C:\Users\Optovue User\Desktop\Vic"
+
+schtasks /query /tn "windows7"
+dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+
+# powershell
+
+Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\studiovision_monitor.lnk" -Force
+
+dir "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
