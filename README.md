@@ -72,8 +72,7 @@ Studiovision-Autosync/
 │   ├── studVMonitor_Box1_V3.py
 │   ├── studVMonitor_Box2.py
 │   └── studVMonitor_Box2_V2.py
-└── shell/
-    └── Shell_command.ipynb
+└── Shell_command.ipynb
 ```
 
 ---
@@ -222,7 +221,7 @@ Résultat attendu :
 dist/studVMonitor_V3.exe
 ```
 
-Le notebook [`shell/Shell_command.ipynb`](shell/Shell_command.ipynb) fournit une procédure générique pour :
+Le notebook [`Shell_command.ipynb`](Shell_command.ipynb) fournit une procédure générique pour :
 
 - installer les dépendances ;
 - générer un exécutable ;
