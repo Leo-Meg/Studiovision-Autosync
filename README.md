@@ -1,216 +1,209 @@
-# Studiovision-Autosync
+# Studiovision Autosync
 
-Automatic image routing script for [StudioVision](https://www.studiodentaire.com/) — a dental practice management software.  
-When a medical imaging device saves a photo, the script detects it, identifies the open patient in StudioVision, moves the file to the correct patient folder on the network drive, and inserts a record in the Access database so the image appears immediately in the patient's file.
+Studiovision Autosync est un routeur d’images pour StudioVision. Il surveille un dossier source alimenté par un appareil d’imagerie, identifie le patient actuellement ouvert dans StudioVision, déplace l’image vers le bon dossier patient, puis ajoute l’entrée correspondante dans la base Access afin que l’image apparaisse dans le dossier du patient.
 
----
-
-## Scripts
-
-Six variants are provided in `src/`. They share the same core logic and configuration constants.
-
-| File | Version | Description |
-|---|---|---|
-| `studiovision_monitor.py` | v3.5 | Base version. Watches a flat source folder for new images. |
-| `windows7.py` | v3.5 | Same as above, using `typing.Optional` for Python 3.9 / Windows 7 compatibility. |
-| `box2.py` | v3.6 | Extended version with **Nidek device support** (see below). |
-| `studiovision_monitorV2.py` | v3.6 | Improved base version with **batched UI refresh** and **SFDoc-only requery** (see below). |
-| `windows7V2.py` | v3.6 | V2 improvements ported to Python 3.9 / Windows 7 compatible syntax (`typing.Optional`). |
-| `box2V2.py` | v3.6 | Nidek support + V2 improvements (batched refresh, SFDoc-only requery). |
+Le projet est destiné à un environnement Windows avec StudioVision, Microsoft Access/ODBC et des postes d’acquisition d’images.
 
 ---
 
-## How it works
+## Principe général
 
-1. **Watchdog** monitors `SOURCE_DIR` for new image files (recursively).
-2. Each detected file is pushed to a queue and picked up by a background worker thread.
-3. The worker waits until the device has finished writing the file (lock-check with retries).
-4. It polls the active StudioVision Access form via COM to get the current patient (code, last name, first name).
-5. It queries `PUBLIC.MDB` to resolve the patient's folder on the network drive using an existing `Photo externe` entry.
-6. It moves the image into that folder, appending a timestamp suffix on name conflict.
-7. It inserts a new row into `PUBLIC.MDB` so StudioVision registers the image.
-8. It requeried the `SFDoc` subform (with a `Refresh()` fallback) and moves to the last record so the new image is immediately visible.
-9. If no patient is found within the configured timeout, the file is moved to the orphan folder.
-
----
-
-## Nidek device support (`box2.py` and `box2V2.py`)
-
-Nidek devices save scans as a set of files inside a sub-folder (`SOURCE_DIR/<device>/<scan>/`). `box2.py` handles this layout:
-
-- Waits 2 seconds after the first file event to let the full scan land.
-- Deletes XML sidecar files automatically.
-- Keeps only the **largest image** in the scan folder; all others (thumbnails) are deleted.
-- Cleans up the scan folder and its parent once the main image has been processed.
-- Tracks already-processed scan folders to drop any residual files that arrive late in the queue.
-
-Files not inside a Nidek sub-folder are processed normally (same as the base version).
+1. Le programme surveille un dossier source avec `watchdog`.
+2. Lorsqu’une image arrive, elle est placée dans une file de traitement.
+3. Le programme attend que l’écriture du fichier soit terminée.
+4. Le patient actif est récupéré dans StudioVision via COM/Access.
+5. Le dossier patient est résolu depuis `PUBLIC.MDB`.
+6. L’image est déplacée dans le dossier patient.
+7. Une ligne est ajoutée dans `PUBLIC.MDB` pour référencer l’image.
+8. L’interface StudioVision est actualisée pour rendre l’image visible.
+9. Si aucun patient valide n’est trouvé dans le délai prévu, l’image est déplacée dans le dossier des orphelins.
 
 ---
 
-## Requirements
+## Nommage normalisé des scripts
 
-- **Windows only** — requires `win32com` (COM automation) and `pyodbc` (Access ODBC driver).
-- Python 3.10+ (`studiovision_monitor.py`, `studiovision_monitorV2.py`, `box2.py`, `box2V2.py`) or Python 3.9+ (`windows7.py`, `windows7V2.py`).
-- Microsoft Access ODBC driver installed on the machine.
+Tous les scripts destinés à produire un exécutable commencent maintenant par `studVMonitor_`.
 
-```bash
-pip install -r requirements.txt
+| Script | Rôle |
+|---|---|
+| `src/studVMonitor_V1.py` | Version de base du routeur d’images. |
+| `src/studVMonitor_V2.py` | Version améliorée avec actualisation groupée de l’interface et requery ciblé du sous-formulaire `SFDoc`. |
+| `src/studVMonitor_V3.py` | Version V2 avec verrou mono-instance Windows empêchant plusieurs processus simultanés. |
+| `src/studVMonitor_Windows7.py` | Variante compatible Python 3.9 / Windows 7 de la version de base. |
+| `src/studVMonitor_Windows7_V2.py` | Variante Windows 7 avec les améliorations de la V2. |
+| `src/studVMonitor_Box1_V3.py` | Variante dédiée BOX 1. |
+| `src/studVMonitor_Box2.py` | Variante dédiée BOX 2 avec prise en charge d’une structure de fichiers issue d’un appareil Nidek. |
+| `src/studVMonitor_Box2_V2.py` | Variante BOX 2 avec les améliorations de la V2. |
+
+Les anciens noms de fichiers ont été retirés afin d’éviter les ambiguïtés lors de la génération des exécutables.
+
+---
+
+## Version V3 : verrou mono-instance
+
+`studVMonitor_V3.py` ajoute un verrou système Windows basé sur un mutex global.
+
+Objectif : empêcher définitivement la multiplication des processus si l’utilisateur lance deux fois le même exécutable, ou si un raccourci de démarrage automatique est déclenché alors qu’une instance est déjà active.
+
+Comportement attendu :
+
+- la première instance continue normalement ;
+- toute instance supplémentaire quitte immédiatement ;
+- une ligne d’erreur est écrite dans les logs :
+
+```text
+ERROR [MainThread] Another instance is already running. Exiting to prevent duplicate processing.
 ```
 
-| Package | Purpose |
-|---|---|
-| `watchdog` | File system monitoring |
-| `pyodbc` | Access database connection via ODBC |
-| `pywin32` | COM automation for interacting with Access |
+Cette protection réduit le risque de double traitement, de conflits sur les fichiers surveillés et d’insertions multiples dans la base Access.
 
 ---
 
 ## Configuration
 
-Set the following paths at the top of whichever script you run:
+Avant de lancer ou compiler un script, renseigner les chemins en haut du fichier choisi :
 
 | Variable | Description |
 |---|---|
-| `SOURCE_DIR` | Folder watched for new images (shared by the imaging device) |
-| `ORPHAN_DIR` | Destination for files that could not be matched to a patient |
-| `DEST_PHOTOS` | Root of the patient photo folders on the network drive |
-| `PUBLIC_MDB` | Path to `PUBLIC.MDB` (StudioVision shared database) |
-| `DOCUM_MDB` | Path to `DOCUM.MDB` (reserved, currently unused) |
+| `SOURCE_DIR` | Dossier surveillé dans lequel l’appareil dépose les images. |
+| `ORPHAN_DIR` | Dossier de sortie pour les images non associées à un patient. |
+| `DEST_PHOTOS` | Racine des dossiers patients StudioVision. |
+| `PUBLIC_MDB` | Chemin vers la base Access principale `PUBLIC.MDB`. |
+| `DOCUM_MDB` | Chemin vers `DOCUM.MDB`, conservé pour compatibilité. |
 
-Other tunable constants:
+Autres paramètres importants :
 
-| Constant | Default | Description |
-|---|---|---|
-| `FILE_LOCK_RETRY_DELAY` | `3` s | Delay between retries when a file is still locked |
-| `FILE_LOCK_MAX_ATTEMPTS` | `15` | Max retries before giving up on a locked file |
-| `PATIENT_POLL_INTERVAL` | `3` s | How often to poll Access for an open patient |
-| `PATIENT_WAIT_TIMEOUT` | `900` s | Time before orphaning a file if no patient is found (15 min) |
-| `SFDOC_SUBFORM_NAME` | `"SFDoc"` | Name of the Access subform listing documents — update if renamed |
+| Constante | Valeur par défaut | Rôle |
+|---|---:|---|
+| `FILE_LOCK_RETRY_DELAY` | `3` secondes | Pause entre deux tentatives lorsqu’un fichier est encore verrouillé. |
+| `FILE_LOCK_MAX_ATTEMPTS` | `15` | Nombre maximal de tentatives avant abandon. |
+| `PATIENT_POLL_INTERVAL` | `3` secondes | Fréquence de recherche du patient actif. |
+| `PATIENT_WAIT_TIMEOUT` | `900` secondes | Délai maximal avant déplacement vers le dossier des orphelins. |
+| `SFDOC_SUBFORM_NAME` | `"SFDoc"` | Nom du sous-formulaire StudioVision à actualiser. |
 
 ---
 
-## Watched extensions
+## Extensions surveillées
 
-The following file extensions are monitored by default:
+Extensions prises en charge par défaut :
 
-`.jpg`, `.jpeg`, `.jfif`, `.png`, `.bmp`, `.tif`, `.tiff`, `.dcm`
+```text
+.jpg, .jpeg, .jfif, .png, .bmp, .tif, .tiff, .dcm
+```
 
-File type → database description mapping:
+Correspondance utilisée pour la description enregistrée en base :
 
-| Extension | Description inserted |
+| Extension | Description |
 |---|---|
 | `.tif`, `.tiff` | `OCT` |
 | `.dcm` | `DICOM` |
-| all others | `Image` |
-
-To add or remove extensions, edit `WATCHED_EXTENSIONS` and update `EXAM_DESCRIPTION` accordingly.
+| autres extensions | `Image` |
 
 ---
 
-## Running
+## Prérequis
+
+- Windows.
+- Python adapté à la version du script utilisé.
+- Pilote ODBC Microsoft Access installé.
+- StudioVision et ses bases Access accessibles depuis le poste.
+- Dépendances Python du fichier `requirements.txt`.
+
+Installation des dépendances :
 
 ```bash
-python src/box2V2.py
-# or
-python src/box2.py
-# or
-python src/studiovision_monitorV2.py
-# or
-python src/studiovision_monitor.py
-# or
-python src/windows7V2.py   # Windows 7 / Python 3.9, with V2 improvements
-# or
-python src/windows7.py     # Windows 7 / Python 3.9, base version
+pip install -r requirements.txt
 ```
 
-Logs are written to both the console and `image_router.log` in the working directory.  
-Stop with `Ctrl+C` — the script will finish processing any remaining queued files before exiting.
+Dépendances principales :
+
+| Package | Utilisation |
+|---|---|
+| `watchdog` | Surveillance du système de fichiers. |
+| `pyodbc` | Connexion aux bases Access. |
+| `pywin32` | Automatisation COM Windows et verrou mono-instance. |
 
 ---
 
-## Patient folder resolution
+## Lancement en Python
 
-The script finds the patient folder by querying `PUBLIC.MDB` for an existing `Photo externe` entry for the same patient code. That field stores a relative path:
+Exemple générique :
 
+```bash
+python src/studVMonitor_V3.py
 ```
-\<group_folder>\<patient_folder>\filename.jpg
-```
 
-The group and patient folder names are extracted and combined with `DEST_PHOTOS` to build the absolute path on disk.
+Choisir le script correspondant au poste, à l’OS ou à la BOX concernée.
 
 ---
 
-## Orphan files
+## Génération d’un exécutable
 
-A file is moved to `ORPHAN_DIR` when:
+Les exécutables sont générés avec PyInstaller.
 
-- No patient is open in StudioVision within the configured timeout.
-- The patient folder cannot be resolved from the database.
+Exemple générique :
 
-All orphan events are logged as warnings and must be handled manually.
+```bash
+pyinstaller --onefile --noconsole --name studVMonitor_V3 src/studVMonitor_V3.py
+```
+
+Le nom passé à `--name` doit rester cohérent avec le script source afin de faciliter le diagnostic et la maintenance.
 
 ---
 
-## Technical notes
+## Notebook de commandes shell
 
-- `pythoncom.CoInitialize()` / `CoUninitialize()` are called on the worker thread — COM objects cannot be shared across threads.
-- `DOCUM.MDB` is read-only for inserts; all writes go to `PUBLIC.MDB`.
-- The `windows7.py` and `windows7V2.py` variants avoid `X | None` union syntax, using `typing.Optional` instead for compatibility with Python 3.9.
-- The V2 variants (`studiovision_monitorV2.py`, `box2V2.py`, `windows7V2.py`) share the same improvements: batched UI refresh and SFDoc-only requery.
+Le fichier texte historique `shell/Shell commands` a été remplacé par :
+
+```text
+shell/Shell_command.ipynb
+```
+
+Ce notebook explique les commandes utiles pour :
+
+- générer un exécutable ;
+- créer un raccourci de démarrage automatique Windows ;
+- vérifier le dossier de démarrage ;
+- arrêter un processus ;
+- supprimer un raccourci de démarrage ;
+- nettoyer un dossier de build.
+
+Les exemples sont volontairement génériques afin de pouvoir être réutilisés proprement sur n’importe quel poste.
 
 ---
 
-## Deployment
+## Logs
 
-The scripts are packaged as standalone executables using **PyInstaller** and launched automatically at Windows startup via a shortcut in the Startup folder.
+Les logs sont écrits dans la console et/ou dans un fichier selon la variante utilisée.
 
-### Build the executable
+Les variantes récentes utilisent de préférence un dossier utilisateur dédié :
 
-```cmd
-cd C:\path\to\script
-pyinstaller --onefile --noconsole --name studiovision_monitor studiovision_monitor.py
+```text
+%USERPROFILE%\studiovision\image_router.log
 ```
 
-> Replace `studiovision_monitor` with `windows7`, `box2`, etc. as needed.
-
-### Add to Windows Startup (PowerShell)
-
-```powershell
-$exe     = "C:\Users\Optovue User\Desktop\dist\studiovision_monitor.exe"
-$startup = [System.Environment]::GetFolderPath("Startup")
-$shell   = New-Object -ComObject WScript.Shell
-$shortcut = $shell.CreateShortcut("$startup\studiovision_monitor.lnk")
-$shortcut.TargetPath       = $exe
-$shortcut.WorkingDirectory = "C:\Users\Optovue User\Desktop\dist"
-$shortcut.Save()
-```
-
-### Remove from Startup & stop the process (CMD)
-
-```cmd
-taskkill /f /im studiovision_monitor.exe /t
-del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\studiovision_monitor.lnk"
-```
-
-### Check Startup folder contents
-
-```cmd
-dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
-```
+Sur certaines variantes historiques, le fichier `image_router.log` peut être créé dans le répertoire courant.
 
 ---
 
-## studiovision_monitorV2.py / box2V2.py / windows7V2.py — what changed vs v3.5
+## Fichiers orphelins
 
-### Batched UI refresh (burst debounce)
+Une image est déplacée vers `ORPHAN_DIR` lorsqu’elle ne peut pas être associée automatiquement à un patient.
 
-In v3.5, `refresh_ui()` was called immediately after every successful DB insert, which caused Access to freeze when a device sent several images in rapid succession.
+Causes fréquentes :
 
-`studiovision_monitorV2.py` replaces the blocking `file_queue.get()` with a `get(timeout=1.5)`. After each successful insert a `needs_refresh` flag is raised instead of calling `refresh_ui()` immediately. When the queue stays empty for 1.5 s (i.e. the burst is over), the refresh fires exactly once and the flag resets. This collapses N consecutive refreshes into a single one.
+- aucun patient ouvert dans StudioVision ;
+- délai d’attente dépassé ;
+- dossier patient introuvable dans `PUBLIC.MDB` ;
+- erreur d’accès au fichier ou à la base.
 
-### SFDoc-only requery
+Ces fichiers doivent être contrôlés manuellement.
 
-In v3.5, `refresh_ui()` called `Requery()` / `Refresh()` on the entire active form, which reset the parent form's current-record pointer and sent the doctor back to record #1.
+---
 
-`studiovision_monitorV2.py` introduces `_find_sfdoc()`, which recursively walks the control tree to locate the `SFDoc` subform and requeried **only that subform**. The parent form's recordset is never touched.
+## Notes techniques
+
+- `pythoncom.CoInitialize()` et `pythoncom.CoUninitialize()` sont utilisés dans le thread de travail, car les objets COM ne doivent pas être partagés directement entre threads.
+- Les variantes V2 réduisent les blocages StudioVision lors de l’arrivée de plusieurs images en rafale.
+- `studVMonitor_V3.py` doit être privilégié lorsqu’un poste risque de lancer plusieurs instances par erreur.
+- Les variantes Windows 7 évitent certaines annotations Python modernes afin de rester compatibles avec Python 3.9.
