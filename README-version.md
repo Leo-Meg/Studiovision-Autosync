@@ -178,8 +178,7 @@ Lorsqu’une nouvelle variante est créée :
 1. conserver le préfixe `studVMonitor_` ;
 2. indiquer clairement la version, l’OS ou la BOX dans le nom ;
 3. documenter la variante dans ce fichier ;
-4. éviter les noms génériques comme `test.py`, `windows7.py` ou `monitor.py` ;
-5. conserver un nom d’exécutable cohérent avec le nom du script source.
+4. conserver un nom d’exécutable cohérent avec le nom du script source.
 
 Exemple :
 
