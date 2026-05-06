@@ -1,5 +1,6 @@
 # Studiovision Autosync
 
+
 **Studiovision Autosync** est un outil Windows de routage automatique d’images vers les dossiers patients StudioVision.
 
 Le programme surveille un dossier d’entrée alimenté par un appareil d’imagerie. Lorsqu’une image arrive, il identifie le patient actuellement ouvert dans StudioVision, déplace le fichier vers le bon dossier patient, puis ajoute l’entrée correspondante dans la base Access afin que le document apparaisse dans l’interface StudioVision.
