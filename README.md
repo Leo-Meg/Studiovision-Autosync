@@ -11,9 +11,9 @@ Le programme surveille un dossier d’entrée. Quand une image arrive, il récup
 
 | Fichier | Rôle |
 |---|---|
-| `README-version.md` | Compare les scripts Python et indique les différences concrètes entre versions. |
-| `README-rendu-final.md` | Décrit l’organisation attendue des dossiers et fichiers sur le poste installé. |
-| `README-lecture-log.md` | Explique comment lire et interpréter le fichier `image_router.log`. |
+| [README-version.md](README-version.md) | Compare les scripts Python. |
+| [README-rendu-final.md](README-rendu-final.md) | Organisation finale du poste installé. |
+| [README-lecture-log.md](README-lecture-log.md) | Lecture du fichier image_router.log. |
 | `shell/Shell_command.ipynb` | Regroupe les commandes utiles pour compiler, installer, vérifier et désinstaller. |
 
 ---
@@ -69,11 +69,7 @@ Pourquoi :
 - écrit les logs dans `%USERPROFILE%\studiovision\image_router.log` ;
 - empêche le lancement simultané de deux instances.
 
-Pour les différences entre scripts, lire :
-
-```text
-README-version.md
-```
+Pour les différences entre scripts, lire [README-version.md](README-version.md).
 
 ---
 
@@ -196,11 +192,7 @@ Le dossier de travail recommandé est :
 C:\Studiovision-Autosync\dist
 ```
 
-Pour l’organisation finale des dossiers sur le poste installé, lire :
-
-```text
-README-rendu-final.md
-```
+Pour l’organisation finale des dossiers sur le poste installé, lire [README-rendu-final.md](README-rendu-final.md).
 
 ---
 
@@ -214,11 +206,7 @@ image_router.log
 C:\Studiovision-Autosync\logs\image_router.log
 ```
 
-Pour savoir quoi vérifier dans `image_router.log`, lire :
-
-```text
-README-lecture-log.md
-```
+Pour savoir quoi vérifier dans `image_router.log`, lire [README-lecture-log.md](README-lecture-log.md).
 
 ---
 
