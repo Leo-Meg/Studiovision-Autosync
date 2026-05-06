@@ -38,8 +38,7 @@ Studiovision-Autosync/
 │   ├── studVMonitor_Box1_V3.py
 │   ├── studVMonitor_Box2.py
 │   └── studVMonitor_Box2_V2.py
-└── shell/
-    └── Shell_command.ipynb
+└── Shell_command.ipynb
 ```
 
 ---
