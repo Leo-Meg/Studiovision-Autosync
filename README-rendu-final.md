@@ -1,6 +1,5 @@
 # README-rendu-final — installation sur un poste
 
-PLAQUE
 
 Ce fichier décrit les dossiers et fichiers à placer sur l’ordinateur qui exécutera `studVMonitor`.
 
