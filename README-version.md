@@ -1,6 +1,5 @@
 # README-version — différences entre scripts
 
-PLAQUE
 
 Ce fichier compare les scripts Python présents dans `src/`.
 
