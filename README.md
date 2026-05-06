@@ -7,7 +7,7 @@ When a medical imaging device saves a photo, the script detects it, identifies t
 
 ## Scripts
 
-Three variants are provided in `src/`. They share the same core logic and configuration constants.
+Six variants are provided in `src/`. They share the same core logic and configuration constants.
 
 | File | Version | Description |
 |---|---|---|
@@ -15,6 +15,8 @@ Three variants are provided in `src/`. They share the same core logic and config
 | `windows7.py` | v3.5 | Same as above, using `typing.Optional` for Python 3.9 / Windows 7 compatibility. |
 | `box2.py` | v3.6 | Extended version with **Nidek device support** (see below). |
 | `studiovision_monitorV2.py` | v3.6 | Improved base version with **batched UI refresh** and **SFDoc-only requery** (see below). |
+| `windows7V2.py` | v3.6 | V2 improvements ported to Python 3.9 / Windows 7 compatible syntax (`typing.Optional`). |
+| `box2V2.py` | v3.6 | Nidek support + V2 improvements (batched refresh, SFDoc-only requery). |
 
 ---
 
@@ -32,7 +34,7 @@ Three variants are provided in `src/`. They share the same core logic and config
 
 ---
 
-## Nidek device support (`box2.py` only)
+## Nidek device support (`box2.py` and `box2V2.py`)
 
 Nidek devices save scans as a set of files inside a sub-folder (`SOURCE_DIR/<device>/<scan>/`). `box2.py` handles this layout:
 
@@ -49,7 +51,7 @@ Files not inside a Nidek sub-folder are processed normally (same as the base ver
 ## Requirements
 
 - **Windows only** — requires `win32com` (COM automation) and `pyodbc` (Access ODBC driver).
-- Python 3.10+ (`studiovision_monitor.py`, `box2.py`) or Python 3.9+ (`windows7.py`).
+- Python 3.10+ (`studiovision_monitor.py`, `studiovision_monitorV2.py`, `box2.py`, `box2V2.py`) or Python 3.9+ (`windows7.py`, `windows7V2.py`).
 - Microsoft Access ODBC driver installed on the machine.
 
 ```bash
@@ -109,11 +111,17 @@ To add or remove extensions, edit `WATCHED_EXTENSIONS` and update `EXAM_DESCRIPT
 ## Running
 
 ```bash
+python src/box2V2.py
+# or
 python src/box2.py
 # or
 python src/studiovision_monitorV2.py
 # or
 python src/studiovision_monitor.py
+# or
+python src/windows7V2.py   # Windows 7 / Python 3.9, with V2 improvements
+# or
+python src/windows7.py     # Windows 7 / Python 3.9, base version
 ```
 
 Logs are written to both the console and `image_router.log` in the working directory.  
@@ -148,11 +156,52 @@ All orphan events are logged as warnings and must be handled manually.
 
 - `pythoncom.CoInitialize()` / `CoUninitialize()` are called on the worker thread — COM objects cannot be shared across threads.
 - `DOCUM.MDB` is read-only for inserts; all writes go to `PUBLIC.MDB`.
-- The `windows7.py` variant is functionally identical to `studiovision_monitor.py` but avoids `X | None` union syntax for compatibility with Python 3.9.
+- The `windows7.py` and `windows7V2.py` variants avoid `X | None` union syntax, using `typing.Optional` instead for compatibility with Python 3.9.
+- The V2 variants (`studiovision_monitorV2.py`, `box2V2.py`, `windows7V2.py`) share the same improvements: batched UI refresh and SFDoc-only requery.
 
 ---
 
-## studiovision_monitorV2.py — what changed vs v3.5
+## Deployment
+
+The scripts are packaged as standalone executables using **PyInstaller** and launched automatically at Windows startup via a shortcut in the Startup folder.
+
+### Build the executable
+
+```cmd
+cd C:\path\to\script
+pyinstaller --onefile --noconsole --name studiovision_monitor studiovision_monitor.py
+```
+
+> Replace `studiovision_monitor` with `windows7`, `box2`, etc. as needed.
+
+### Add to Windows Startup (PowerShell)
+
+```powershell
+$exe     = "C:\Users\Optovue User\Desktop\dist\studiovision_monitor.exe"
+$startup = [System.Environment]::GetFolderPath("Startup")
+$shell   = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut("$startup\studiovision_monitor.lnk")
+$shortcut.TargetPath       = $exe
+$shortcut.WorkingDirectory = "C:\Users\Optovue User\Desktop\dist"
+$shortcut.Save()
+```
+
+### Remove from Startup & stop the process (CMD)
+
+```cmd
+taskkill /f /im studiovision_monitor.exe /t
+del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\studiovision_monitor.lnk"
+```
+
+### Check Startup folder contents
+
+```cmd
+dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
+```
+
+---
+
+## studiovision_monitorV2.py / box2V2.py / windows7V2.py — what changed vs v3.5
 
 ### Batched UI refresh (burst debounce)
 
