@@ -1,6 +1,5 @@
 # Studiovision Autosync
 
-PLAQUE
 
 Routeur automatique d’images vers les dossiers patients StudioVision.
 
