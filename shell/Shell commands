@@ -33,3 +33,13 @@ dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\studiovision_monitor.lnk" -Force
 
 dir "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+
+# Test
+
+$exe = "C:\Users\Optovue User\Desktop\NouveauDossier\dist\windows7.exe"
+$startup = [System.Environment]::GetFolderPath("Startup")
+$shell = New-Object -ComObject WScript.Shell
+$shortcut = $shell.CreateShortcut("$startup\windows7.lnk")
+$shortcut.TargetPath = $exe
+$shortcut.WorkingDirectory = "C:\Users\Optovue User\Desktop\NouveauDossier\dist"
+$shortcut.Save()
